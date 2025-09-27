@@ -1,5 +1,6 @@
 # app/tabs/done_tab.py
-import json, sqlite3
+import json
+import sqlite3
 from datetime import datetime
 from typing import List, Tuple, Optional
 
@@ -16,19 +17,19 @@ from app.buffer import enqueue_write
 class DoneTab(QWidget):
     """Abgeschlossene Fälle: standardmäßig nach Rückgabedatum DESC (neueste oben),
        Sortieren per Header-Klick, Suche, 'Wieder öffnen?' Checkbox.
-       Spalten: ID, Klinik, Gerät, Wave-/Serienummer, Abgeber, Techniker, Grund,
+       Spalten: ID, Klinik, Gerät, Wave- / Serienummer, Abgeber, Techniker, Grund,
                 Abgabe, Zurück, Angelegt von, Erledigt von, Notizen, Wieder öffnen?
     """
     case_reopened = pyqtSignal(int)
 
     # Spalten-Indices (0-basiert)
-    COL_ID        = 0
-    COL_ABGABE    = 7
-    COL_ZURUECK   = 8
+    COL_ID = 0
+    COL_ABGABE = 7
+    COL_ZURUECK = 8
     COL_CREATEDBY = 9
-    COL_CLOSEDBY  = 10
-    COL_NOTES     = 11
-    COL_REOPEN    = 12
+    COL_CLOSEDBY = 10
+    COL_NOTES = 11
+    COL_REOPEN = 12
 
     def __init__(self, conn: sqlite3.Connection, role: str, clinics_csv: str):
         super().__init__()
@@ -45,8 +46,8 @@ class DoneTab(QWidget):
         self.table = QTableWidget()
         self.table.setColumnCount(13)
         self.table.setHorizontalHeaderLabels([
-            "ID","Klinik","Gerät","Wave- / Serienummer","Abgeber","Techniker",  # <-- Bezeichnung geändert
-            "Grund","Abgabe","Zurück","Angelegt von","Erledigt von","Notizen","Wieder öffnen?"
+            "ID", "Klinik", "Gerät", "Wave- / Serienummer", "Abgeber", "Techniker",
+            "Grund", "Abgabe", "Zurück", "Angelegt von", "Erledigt von", "Notizen", "Wieder öffnen?"
         ])
         self.table.setSelectionBehavior(self.table.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -54,7 +55,7 @@ class DoneTab(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(32)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
-        self.table.setSortingEnabled(True)  # Sortieren per Header-Klick erlauben
+        self.table.setSortingEnabled(True)  # Sortieren per Header-Klick
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.search)
@@ -65,6 +66,7 @@ class DoneTab(QWidget):
 
     # ---------- Schema/Meta ----------
     def _detect_column_exprs(self) -> tuple[str, str, str]:
+        """Sichere SQL-Ausdrücke für created_by/closed_by/notes (Fallback: '')."""
         try:
             cur = self.conn.cursor()
             cur.execute("PRAGMA table_info(cases);")
@@ -72,8 +74,8 @@ class DoneTab(QWidget):
         except Exception:
             cols = set()
         created_expr = "created_by" if "created_by" in cols else "''"
-        closed_expr  = "closed_by"  if "closed_by"  in cols else "''"
-        notes_expr   = "notes"      if "notes"      in cols else "''"
+        closed_expr = "closed_by" if "closed_by" in cols else "''"
+        notes_expr = "notes" if "notes" in cols else "''"
         return created_expr, closed_expr, notes_expr
 
     # ---------- Datenbeschaffung ----------
@@ -109,13 +111,17 @@ class DoneTab(QWidget):
 
     def refresh(self):
         rows = self._fetch()
+
+        # Freitextsuche
         q = self.search.text().strip().lower()
         if q:
-            # Suche inkl. created_by, closed_by, notes
             rows = [r for r in rows if any(
                 (str(x or "").lower().find(q) >= 0)
-                for x in (r[1], r[2], r[3], r[4], r[5], r[6], r[self.COL_ABGABE], r[self.COL_ZURUECK],
-                          r[self.COL_CREATEDBY], r[self.COL_CLOSEDBY], r[self.COL_NOTES])
+                for x in (
+                    r[1], r[2], r[3], r[4], r[5], r[6],
+                    r[self.COL_ABGABE], r[self.COL_ZURUECK],
+                    r[self.COL_CREATEDBY], r[self.COL_CLOSEDBY], r[self.COL_NOTES]
+                )
             )]
 
         # Sortiereinstellungen merken (Benutzerauswahl erhalten)
@@ -127,9 +133,11 @@ class DoneTab(QWidget):
         self.table.setRowCount(len(rows))
 
         for r, row in enumerate(rows):
+            # 0..11 sind Textspalten
             for c in range(self.COL_REOPEN):
                 val = row[c]
                 text = "" if val is None else str(val)
+                # Notizen elidieren (alte Datensätze könnten lang sein)
                 display = (text[:200] + "…") if (c == self.COL_NOTES and len(text) > 200) else text
 
                 item = QTableWidgetItem(display)
@@ -176,7 +184,7 @@ class DoneTab(QWidget):
             # Benutzer-Sortierung beibehalten
             self.table.sortItems(sort_section, sort_order)
 
-    # ---------- Reopen ----------
+    # ---------- Reopen (crash-safe via deferred UI) ----------
     def _on_reopen_clicked(self, checked: bool):
         if not checked:
             return
@@ -186,8 +194,9 @@ class DoneTab(QWidget):
         cid = sender.property("case_id")
         if cid is None:
             return
-        case_id = int(cid)
 
+        case_id = int(cid)
+        device_label = self._device_label(case_id)  # Gerät vorab auflösen
         sender.setEnabled(False)
 
         def defer_offline_reset():
@@ -202,11 +211,15 @@ class DoneTab(QWidget):
 
         try:
             with self.conn:
+                # Spalten robust nachrüsten (falls sehr alte DB)
                 self._ensure_case_columns(["status", "date_returned", "closed_by"])
+
+                # Status zurück auf "In Reparatur", Rückgabedatum/closed_by leeren
                 self.conn.execute(
                     "UPDATE cases SET status='In Reparatur', date_returned=NULL, closed_by=NULL WHERE id=?",
                     (case_id,)
                 )
+                # Audit
                 self.conn.execute(
                     "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
                     ("case_update", "case", case_id, json.dumps(
@@ -215,11 +228,17 @@ class DoneTab(QWidget):
                     ))
                 )
 
-            QTimer.singleShot(0, lambda: self._after_reopen_success(case_id))
+            QTimer.singleShot(0, lambda cid=case_id, label=device_label: self._after_reopen_success(cid, label))
 
         except Exception:
-            enqueue_write({"type": "update_case", "id": case_id,
-                           "date_returned": None, "status": "In Reparatur", "closed_by": None})
+            # Offline-Fallback
+            enqueue_write({
+                "type": "update_case",
+                "id": case_id,
+                "date_returned": None,
+                "status": "In Reparatur",
+                "closed_by": None
+            })
             QTimer.singleShot(0, defer_offline_reset)
 
     def _ensure_case_columns(self, names: list[str]) -> None:
@@ -237,13 +256,15 @@ class DoneTab(QWidget):
                 else:
                     self.conn.execute(f"ALTER TABLE cases ADD COLUMN {n} TEXT")
 
-    def _after_reopen_success(self, case_id: int):
+    def _after_reopen_success(self, case_id: int, device_label: str):
         self.case_reopened.emit(case_id)
         self.refresh()
-        QMessageBox.information(self, "Geöffnet", f"Fall {case_id} wurde wieder geöffnet.")
+        QMessageBox.information(self, "Geöffnet", f"Gerät „{device_label}“ wurde wieder geöffnet.")
 
     # ---------- Sort-Helper ----------
     def _date_sort_key(self, s: Optional[str]) -> int:
+        """Konvertiert Datum (yyyy-mm-dd oder ähnliche) in 'Tage seit 1970-01-01' für stabile Sortierung.
+           Leere/ungültige Werte -> sehr kleiner Key (damit bei DESC ganz unten)."""
         if not s:
             return -10**9
         s = s.strip()
@@ -253,8 +274,27 @@ class DoneTab(QWidget):
                 return (dt - datetime(1970, 1, 1)).days
             except ValueError:
                 continue
+        # Fallback: ISO-like
         try:
             dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
             return (dt.replace(tzinfo=None) - datetime(1970, 1, 1)).days
         except Exception:
             return -10**9
+
+    # ---------- Helpers ----------
+    def _device_label(self, case_id: int) -> str:
+        """Liest eine sprechende Gerätebezeichnung für Meldungen (z. B. 'Endoskop (123456)')."""
+        try:
+            cur = self.conn.cursor()
+            row = cur.execute(
+                "SELECT device_name, wave_number FROM cases WHERE id=?",
+                (case_id,)
+            ).fetchone()
+        except Exception:
+            row = None
+        if not row:
+            return f"ID {case_id}"
+        name, wave = row
+        label = (name or "").strip() or f"ID {case_id}"
+        wave = (wave or "").strip()
+        return f"{label} ({wave})" if wave else label

@@ -1,5 +1,6 @@
 # app/tabs/open_tab.py
-import json, sqlite3
+import json
+import sqlite3
 from datetime import datetime, timezone
 from typing import List, Tuple, Optional
 
@@ -14,9 +15,10 @@ from app.helpers import clinics_of_user
 from app.buffer import enqueue_write
 
 DATE_INPUT_FORMATS = (
-    "%Y-%m-%d","%Y-%m-%d %H:%M","%Y-%m-%d %H:%M:%S",
-    "%d.%m.%Y","%d.%m.%Y %H:%M","%d.%m.%Y %H:%M:%S",
+    "%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
+    "%d.%m.%Y", "%d.%m.%Y %H:%M", "%d.%m.%Y %H:%M:%S",
 )
+
 
 class OpenTab(QWidget):
     case_completed = pyqtSignal(int)
@@ -29,7 +31,7 @@ class OpenTab(QWidget):
     COL_SUBMITTER = 4
     COL_PROVIDER = 5
     COL_REASON = 6
-    OPEN_DATE_COL = 7        # "Abgabe"
+    OPEN_DATE_COL = 7          # "Abgabe"
     COL_CREATED_BY = 8
     COL_NOTES = 9
     COL_DONE = 10
@@ -56,8 +58,8 @@ class OpenTab(QWidget):
         self.table = QTableWidget()
         self.table.setColumnCount(11)
         self.table.setHorizontalHeaderLabels([
-            "ID","Klinik","Gerät","Wave- / Serienummer","Abgeber","Techniker",  # <-- Bezeichnung geändert
-            "Grund","Abgabe","Angelegt von","Notizen","Erledigt?"
+            "ID", "Klinik", "Gerät", "Wave- / Serienummer", "Abgeber", "Techniker",
+            "Grund", "Abgabe", "Angelegt von", "Notizen", "Erledigt?"
         ])
         self.table.setSelectionBehavior(self.table.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -66,9 +68,7 @@ class OpenTab(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.horizontalHeader().setStretchLastSection(True)
-
-        # Sortieren per Header-Klick erlauben
-        self.table.setSortingEnabled(True)
+        self.table.setSortingEnabled(True)  # Sortieren per Header-Klick
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.search)
@@ -89,7 +89,7 @@ class OpenTab(QWidget):
         except Exception:
             cols = set()
         created_expr = "created_by" if "created_by" in cols else "''"
-        notes_expr   = "notes"      if "notes"      in cols else "''"
+        notes_expr = "notes" if "notes" in cols else "''"
         return created_expr, notes_expr
 
     # ---------------------------
@@ -136,7 +136,7 @@ class OpenTab(QWidget):
                           r[self.COL_SUBMITTER], r[self.COL_PROVIDER], r[self.COL_CREATED_BY], r[self.COL_NOTES])
             )]
 
-        # Aktuelle Sortierinfo merken (damit Benutzerwahl erhalten bleibt)
+        # Sortierinfo (beibehalten)
         header = self.table.horizontalHeader()
         sort_section = header.sortIndicatorSection()
         sort_order = header.sortIndicatorOrder()
@@ -145,11 +145,9 @@ class OpenTab(QWidget):
         self.table.setRowCount(len(rows))
 
         for r, row in enumerate(rows):
-            # row: (id, clinic, device_name, wave_number, submitter, service_provider, reason, date_submitted, created_by, notes)
+            # Textspalten
             for c, val in enumerate(row):
                 full_text = "" if val is None else str(val)
-
-                # Notes defensiv elidieren (alte Einträge könnten >50 sein)
                 display_text = full_text
                 if c == self.COL_NOTES and len(full_text) > 200:
                     display_text = full_text[:200] + "…"
@@ -157,15 +155,14 @@ class OpenTab(QWidget):
                 item = QTableWidgetItem(display_text)
                 item.setToolTip(full_text)
 
-                # Sortier-Keys setzen (numeric/Datum) damit Header-Sortierung korrekt ist
+                # Sortier-Keys
                 if c == self.COL_ID:
                     try:
                         item.setData(Qt.ItemDataRole.UserRole, int(full_text or "0"))
                     except ValueError:
                         item.setData(Qt.ItemDataRole.UserRole, 0)
                 elif c == self.OPEN_DATE_COL:
-                    jd = self._date_to_julian(full_text)
-                    item.setData(Qt.ItemDataRole.UserRole, jd)
+                    item.setData(Qt.ItemDataRole.UserRole, self._date_to_julian(full_text))
 
                 # Ausrichtung
                 if c == self.COL_ID:
@@ -178,7 +175,7 @@ class OpenTab(QWidget):
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(r, c, item)
 
-            # Spalte "Erledigt?" (Checkbox)
+            # Checkbox "Erledigt?" (zentriert)
             chk = QCheckBox()
             chk.setEnabled(not self.read_only)
             chk.setTristate(False)
@@ -194,12 +191,12 @@ class OpenTab(QWidget):
         self.table.resizeColumnsToContents()
         self.table.setSortingEnabled(True)
 
-        # Erstes Mal: Standard-Sortierung -> älteste (am längsten offen) oben, neueste unten
+        # Standard: älteste (am längsten offen) oben
         if self._first_refresh:
             self.table.sortItems(self.OPEN_DATE_COL, Qt.SortOrder.AscendingOrder)
             self._first_refresh = False
         else:
-            # Benutzer-Sortierung beibehalten
+            # Benutzerwahl beibehalten
             self.table.sortItems(sort_section, sort_order)
 
     # ---------------------------
@@ -214,19 +211,22 @@ class OpenTab(QWidget):
         cid = sender.property("case_id")
         if cid is None:
             return
-        case_id = int(cid)
 
+        case_id = int(cid)
+        device_label = self._device_label(case_id)  # Gerät für die Meldung auflösen
         sender.setEnabled(False)
         today = QDate.currentDate().toString("yyyy-MM-dd")
 
         try:
             with self.conn:
                 # Spalten ggf. nachrüsten
-                self._ensure_case_columns(["status","date_returned","closed_by"])
+                self._ensure_case_columns(["status", "date_returned", "closed_by"])
+                # Status + Rückgabedatum + wer erledigt hat
                 self.conn.execute(
                     "UPDATE cases SET status='Abgeschlossen', date_returned=?, closed_by=? WHERE id=?",
                     (today, self.current_username, case_id)
                 )
+                # Audit
                 self.conn.execute(
                     "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
                     ("case_update", "case", case_id, json.dumps(
@@ -235,9 +235,10 @@ class OpenTab(QWidget):
                     ))
                 )
 
-            QTimer.singleShot(0, lambda: self._after_done_success(case_id))
+            QTimer.singleShot(0, lambda cid=case_id, label=device_label: self._after_done_success(cid, label))
 
         except Exception:
+            # Offline-Fallback
             enqueue_write({
                 "type": "update_case",
                 "id": case_id,
@@ -247,25 +248,10 @@ class OpenTab(QWidget):
             })
             QTimer.singleShot(0, lambda: self._after_done_offline(sender))
 
-    def _ensure_case_columns(self, names: list[str]) -> None:
-        cur = self.conn.cursor()
-        cur.execute("PRAGMA table_info(cases);")
-        existing = {row[1] for row in cur.fetchall()}
-        for n in names:
-            if n not in existing:
-                if n == "status":
-                    self.conn.execute("ALTER TABLE cases ADD COLUMN status TEXT DEFAULT 'In Reparatur'")
-                elif n == "date_returned":
-                    self.conn.execute("ALTER TABLE cases ADD COLUMN date_returned TEXT")
-                elif n == "closed_by":
-                    self.conn.execute("ALTER TABLE cases ADD COLUMN closed_by TEXT")
-                else:
-                    self.conn.execute(f"ALTER TABLE cases ADD COLUMN {n} TEXT")
-
-    def _after_done_success(self, case_id: int):
+    def _after_done_success(self, case_id: int, device_label: str):
         self.case_completed.emit(case_id)
         self.refresh()
-        QMessageBox.information(self, "Erledigt", f"Fall {case_id} wurde abgeschlossen und verschoben.")
+        QMessageBox.information(self, "Erledigt", f"Gerät „{device_label}“ wurde abgeschlossen und verschoben.")
 
     def _after_done_offline(self, checkbox: QCheckBox):
         checkbox.blockSignals(True)
@@ -292,6 +278,23 @@ class OpenTab(QWidget):
     # ---------------------------
     # Helpers
     # ---------------------------
+    def _device_label(self, case_id: int) -> str:
+        """Liest eine sprechende Gerätebezeichnung für Meldungen (z. B. 'Endoskop (123456)')."""
+        try:
+            cur = self.conn.cursor()
+            row = cur.execute(
+                "SELECT device_name, wave_number FROM cases WHERE id=?",
+                (case_id,)
+            ).fetchone()
+        except Exception:
+            row = None
+        if not row:
+            return f"ID {case_id}"
+        name, wave = row
+        label = (name or "").strip() or f"ID {case_id}"
+        wave = (wave or "").strip()
+        return f"{label} ({wave})" if wave else label
+
     def _cell_text(self, row: int, col: int) -> Optional[str]:
         if row < 0 or col < 0 or col >= self.table.columnCount():
             return None
@@ -299,19 +302,24 @@ class OpenTab(QWidget):
         return it.text() if it else None
 
     def _date_to_julian(self, s: Optional[str]) -> int:
+        """Konvertiert Datum in 'Tage seit 1970-01-01' für sortierbaren Key."""
         if not s:
             return 10**9
+        s = s.strip()
+
+        dt: Optional[datetime] = None
         try:
-            dt = datetime.strptime(s.strip(), "%Y-%m-%d")
-            return (dt - datetime(1970, 1, 1)).days
+            dt = datetime.strptime(s, "%Y-%m-%d")
         except Exception:
             for fmt in DATE_INPUT_FORMATS[1:]:
                 try:
-                    dt = datetime.strptime(s.strip(), fmt)
-                    return (dt - datetime(1970, 1, 1)).days
+                    dt = datetime.strptime(s, fmt)
+                    break
                 except Exception:
                     continue
+        if dt is None:
             return 10**9
+        return (dt - datetime(1970, 1, 1)).days
 
     def _days_since(self, date_str: Optional[str]) -> Optional[int]:
         if not date_str:
@@ -340,7 +348,22 @@ class OpenTab(QWidget):
         if days is None:
             return None
         if days <= 30:
-            return QBrush(QColor(0, 200, 0))      # kräftiges Grün
+            return QBrush(QColor(0, 200, 0))     # kräftiges Grün
         if days <= 60:
-            return QBrush(QColor(255, 200, 0))    # kräftiges Gelb/Orange
-        return QBrush(QColor(220, 0, 0))          # kräftiges Rot
+            return QBrush(QColor(255, 200, 0))   # kräftiges Gelb/Orange
+        return QBrush(QColor(220, 0, 0))         # kräftiges Rot
+
+    def _ensure_case_columns(self, names: list[str]) -> None:
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(cases);")
+        existing = {row[1] for row in cur.fetchall()}
+        for n in names:
+            if n not in existing:
+                if n == "status":
+                    self.conn.execute("ALTER TABLE cases ADD COLUMN status TEXT DEFAULT 'In Reparatur'")
+                elif n == "date_returned":
+                    self.conn.execute("ALTER TABLE cases ADD COLUMN date_returned TEXT")
+                elif n == "closed_by":
+                    self.conn.execute("ALTER TABLE cases ADD COLUMN closed_by TEXT")
+                else:
+                    self.conn.execute(f"ALTER TABLE cases ADD COLUMN {n} TEXT")
