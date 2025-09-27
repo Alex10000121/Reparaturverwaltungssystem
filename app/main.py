@@ -1,3 +1,4 @@
+# app/main.py
 import sys, sqlite3, csv
 from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar, QStatusBar, QFileDialog, QMessageBox
 from PyQt6.QtGui import QAction
@@ -10,6 +11,7 @@ from app.tabs.create_tab import CreateTab
 from app.tabs.open_tab import OpenTab
 from app.tabs.done_tab import DoneTab
 from app.tabs.admin_tab import AdminTab
+
 
 class Main(QMainWindow):
     def __init__(self, user_id: int, role: str, clinics_csv: str, username: str):
@@ -45,14 +47,27 @@ class Main(QMainWindow):
             self.tabs.addTab(self.tab_admin, "Admin")
 
         if self.role != "Viewer":
-            self.tab_create = CreateTab(self.conn, role=self.role, clinics_csv=self.clinics_csv, submitter_default=self.username)
+            self.tab_create = CreateTab(
+                self.conn,
+                role=self.role,
+                clinics_csv=self.clinics_csv,
+                submitter_default=self.username,
+                current_username=self.username,
+            )
             self.tab_create.case_created.connect(self._on_case_created)
             self.tabs.addTab(self.tab_create, "Erfassen")
 
-        self.tab_open = OpenTab(self.conn, role=self.role, clinics_csv=self.clinics_csv, read_only=(self.role == "Viewer"))
+        self.tab_open = OpenTab(
+            self.conn,
+            role=self.role,
+            clinics_csv=self.clinics_csv,
+            read_only=(self.role == "Viewer"),
+            current_username=self.username,
+        )
         self.tab_done = DoneTab(self.conn, role=self.role, clinics_csv=self.clinics_csv)
         self.tab_open.case_completed.connect(self._on_case_completed)
         self.tab_done.case_reopened.connect(self._on_case_reopened)
+
         self.tabs.addTab(self.tab_open, "Offene Reparaturen")
         self.tabs.addTab(self.tab_done, "Erledigt")
         self.setCentralWidget(self.tabs)
@@ -67,9 +82,15 @@ class Main(QMainWindow):
 
         self.tab_open.refresh(); self.tab_done.refresh()
 
-    def _on_case_created(self): self.tab_open.refresh(); self.tabs.setCurrentWidget(self.tab_open)
-    def _on_case_completed(self, _cid: int): self.tab_done.refresh()
-    def _on_case_reopened(self, _cid: int): self.tab_open.refresh()
+    def _on_case_created(self):
+        self.tab_open.refresh()
+        self.tabs.setCurrentWidget(self.tab_open)
+
+    def _on_case_completed(self, _cid: int):
+        self.tab_done.refresh()
+
+    def _on_case_reopened(self, _cid: int):
+        self.tab_open.refresh()
 
     # --- Export ---
     def export_open(self):
@@ -77,16 +98,21 @@ class Main(QMainWindow):
         if not path: return
         cur = self.conn.cursor()
         if self.role == "Admin" or self.clinics_csv == "ALL":
-            rows = cur.execute("""SELECT id, clinic, device_name, wave_number, submitter, service_provider, reason, date_submitted
-                                  FROM cases WHERE status='In Reparatur' ORDER BY id DESC""").fetchall()
+            rows = cur.execute(
+                """SELECT id, clinic, device_name, wave_number, submitter, service_provider, reason, date_submitted
+                   FROM cases WHERE status='In Reparatur' ORDER BY id DESC"""
+            ).fetchall()
         else:
             allowed = [c.strip() for c in self.clinics_csv.split(",") if c.strip()]
             qmarks = ",".join("?"*len(allowed))
-            rows = cur.execute(f"""SELECT id, clinic, device_name, wave_number, submitter, service_provider, reason, date_submitted
-                                   FROM cases WHERE status='In Reparatur' AND clinic IN ({qmarks}) ORDER BY id DESC""", tuple(allowed)).fetchall()
+            rows = cur.execute(
+                f"""SELECT id, clinic, device_name, wave_number, submitter, service_provider, reason, date_submitted
+                    FROM cases WHERE status='In Reparatur' AND clinic IN ({qmarks}) ORDER BY id DESC""",
+                tuple(allowed)
+            ).fetchall()
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f, delimiter=";")
-            w.writerow(["ID","Klinik","Gerät","Wavenummer / Seriennummer","Abgeber","Techniker","Grund","Abgabe"])
+            w.writerow(["ID","Klinik","Gerät","Wave- / Serienummer","Abgeber","Techniker","Grund","Abgabe"])  # <-- geändert
             w.writerows(rows)
         QMessageBox.information(self, "Export", "Export abgeschlossen.")
 
@@ -95,16 +121,23 @@ class Main(QMainWindow):
         if not path: return
         cur = self.conn.cursor()
         if self.role == "Admin" or self.clinics_csv == "ALL":
-            rows = cur.execute("""SELECT id, clinic, device_name, wave_number, submitter, service_provider, reason, date_submitted, date_returned
-                                  FROM cases WHERE status='Abgeschlossen' ORDER BY id DESC""").fetchall()
+            rows = cur.execute(
+                """SELECT id, clinic, device_name, wave_number, submitter, service_provider, reason,
+                          date_submitted, date_returned
+                   FROM cases WHERE status='Abgeschlossen' ORDER BY id DESC"""
+            ).fetchall()
         else:
             allowed = [c.strip() for c in self.clinics_csv.split(",") if c.strip()]
             qmarks = ",".join("?"*len(allowed))
-            rows = cur.execute(f"""SELECT id, clinic, device_name, wave_number, submitter, service_provider, reason, date_submitted, date_returned
-                                   FROM cases WHERE status='Abgeschlossen' AND clinic IN ({qmarks}) ORDER BY id DESC""", tuple(allowed)).fetchall()
+            rows = cur.execute(
+                f"""SELECT id, clinic, device_name, wave_number, submitter, service_provider, reason,
+                           date_submitted, date_returned
+                    FROM cases WHERE status='Abgeschlossen' AND clinic IN ({qmarks}) ORDER BY id DESC""",
+                tuple(allowed)
+            ).fetchall()
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f, delimiter=";")
-            w.writerow(["ID","Klinik","Gerät","Wavenummer / Seriennummer","Abgeber","Techniker","Grund","Abgabe","Zurück"])
+            w.writerow(["ID","Klinik","Gerät","Wave- / Serienummer","Abgeber","Techniker","Grund","Abgabe","Zurück"])  # <-- geändert
             w.writerows(rows)
         QMessageBox.information(self, "Export", "Export abgeschlossen.")
 

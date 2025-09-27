@@ -1,31 +1,63 @@
+# app/tabs/open_tab.py
 import json, sqlite3
-from PyQt6.QtCore import QDate, Qt, pyqtSignal
+from datetime import datetime, timezone
+from typing import List, Tuple, Optional
+
+from PyQt6.QtCore import QDate, Qt, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor, QBrush
 from PyQt6.QtWidgets import (
     QWidget, QLineEdit, QVBoxLayout, QTableWidget, QTableWidgetItem,
     QCheckBox, QAbstractItemView, QMessageBox, QHBoxLayout
 )
+
 from app.helpers import clinics_of_user
 from app.buffer import enqueue_write
+
+DATE_INPUT_FORMATS = (
+    "%Y-%m-%d","%Y-%m-%d %H:%M","%Y-%m-%d %H:%M:%S",
+    "%d.%m.%Y","%d.%m.%Y %H:%M","%d.%m.%Y %H:%M:%S",
+)
 
 class OpenTab(QWidget):
     case_completed = pyqtSignal(int)
 
-    def __init__(self, conn: sqlite3.Connection, role: str, clinics_csv: str, read_only: bool):
+    # Spalten-Indices
+    COL_ID = 0
+    COL_CLINIC = 1
+    COL_DEVICE = 2
+    COL_WAVE = 3
+    COL_SUBMITTER = 4
+    COL_PROVIDER = 5
+    COL_REASON = 6
+    OPEN_DATE_COL = 7        # "Abgabe"
+    COL_CREATED_BY = 8
+    COL_NOTES = 9
+    COL_DONE = 10
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        role: str,
+        clinics_csv: str,
+        read_only: bool,
+        current_username: Optional[str] = None,
+    ):
         super().__init__()
         self.conn = conn
         self.read_only = read_only
         self.allowed = clinics_of_user(role, clinics_csv)
+        self.current_username = current_username or ""
+        self._created_by_expr, self._notes_expr = self._detect_column_exprs()
 
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Suchen ...")
+        self.search = QLineEdit(placeholderText="Suchen ...")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.refresh)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(10)
+        self.table.setColumnCount(11)
         self.table.setHorizontalHeaderLabels([
-            "ID","Klinik","Gerät","Wavenummer / Seriennummer","Abgeber","Techniker",
-            "Grund","Abgabe","Zurück","Erledigt?"
+            "ID","Klinik","Gerät","Wave- / Serienummer","Abgeber","Techniker",  # <-- Bezeichnung geändert
+            "Grund","Abgabe","Angelegt von","Notizen","Erledigt?"
         ])
         self.table.setSelectionBehavior(self.table.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -35,32 +67,56 @@ class OpenTab(QWidget):
         self.table.setShowGrid(False)
         self.table.horizontalHeader().setStretchLastSection(True)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.search)
-        layout.addWidget(self.table)
+        # Sortieren per Header-Klick erlauben
+        self.table.setSortingEnabled(True)
 
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.search)
+        lay.addWidget(self.table)
+
+        self._first_refresh = True
         self.refresh()
 
-    def _scope_filter_sql(self):
+    # ---------------------------
+    # Schema/Meta
+    # ---------------------------
+    def _detect_column_exprs(self) -> tuple[str, str]:
+        """Erkennt Spalten für 'Angelegt von' (created_by) und 'Notizen' (notes); Fallback: leerer String."""
+        try:
+            cur = self.conn.cursor()
+            cur.execute("PRAGMA table_info(cases);")
+            cols = {row[1] for row in cur.fetchall()}
+        except Exception:
+            cols = set()
+        created_expr = "created_by" if "created_by" in cols else "''"
+        notes_expr   = "notes"      if "notes"      in cols else "''"
+        return created_expr, notes_expr
+
+    # ---------------------------
+    # Datenbeschaffung + Filter
+    # ---------------------------
+    def _scope_filter_sql(self) -> tuple[str, tuple]:
         if self.allowed is None:
             return "WHERE status='In Reparatur'", ()
         qmarks = ",".join("?" * len(self.allowed))
         return f"WHERE status='In Reparatur' AND clinic IN ({qmarks})", tuple(self.allowed)
 
-    def _fetch(self):
+    def _fetch(self) -> List[Tuple]:
         where_sql, params = self._scope_filter_sql()
         cur = self.conn.cursor()
         rows = cur.execute(
             f"""SELECT id, clinic, device_name, wave_number, submitter, service_provider,
-                        reason, date_submitted, date_returned
+                        reason, date_submitted, {self._created_by_expr} AS created_by, {self._notes_expr} AS notes
                  FROM cases {where_sql}
                  ORDER BY id DESC""",
             params
         ).fetchall()
         return rows
 
+    # ---------------------------
+    # Rendering / UI
+    # ---------------------------
     def _centered_checkbox_widget(self, checkbox: QCheckBox) -> QWidget:
-        # Checkbox mittig in der Zelle ausrichten
         wrapper = QWidget()
         lay = QHBoxLayout(wrapper)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -70,59 +126,221 @@ class OpenTab(QWidget):
 
     def refresh(self):
         rows = self._fetch()
+
+        # Textsuche
         q = self.search.text().strip().lower()
         if q:
-            rows = [r for r in rows if any((str(x or "").lower().find(q) >= 0) for x in (r[1], r[2], r[3], r[4], r[5]))]
+            rows = [r for r in rows if any(
+                (str(x or "").lower().find(q) >= 0)
+                for x in (r[self.COL_CLINIC], r[self.COL_DEVICE], r[self.COL_WAVE],
+                          r[self.COL_SUBMITTER], r[self.COL_PROVIDER], r[self.COL_CREATED_BY], r[self.COL_NOTES])
+            )]
+
+        # Aktuelle Sortierinfo merken (damit Benutzerwahl erhalten bleibt)
+        header = self.table.horizontalHeader()
+        sort_section = header.sortIndicatorSection()
+        sort_order = header.sortIndicatorOrder()
+
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
+
         for r, row in enumerate(rows):
-            for c, val in enumerate(row + (None,)):
-                if c < 9:
-                    text = "" if val is None else str(val)
-                    item = QTableWidgetItem(text)
-                    item.setToolTip(text)
-                    if c == 0:  # ID
-                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                    elif c in (7, 8):  # Datumsspalten
-                        item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter)
-                    else:
-                        item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-                    self.table.setItem(r, c, item)
+            # row: (id, clinic, device_name, wave_number, submitter, service_provider, reason, date_submitted, created_by, notes)
+            for c, val in enumerate(row):
+                full_text = "" if val is None else str(val)
+
+                # Notes defensiv elidieren (alte Einträge könnten >50 sein)
+                display_text = full_text
+                if c == self.COL_NOTES and len(full_text) > 200:
+                    display_text = full_text[:200] + "…"
+
+                item = QTableWidgetItem(display_text)
+                item.setToolTip(full_text)
+
+                # Sortier-Keys setzen (numeric/Datum) damit Header-Sortierung korrekt ist
+                if c == self.COL_ID:
+                    try:
+                        item.setData(Qt.ItemDataRole.UserRole, int(full_text or "0"))
+                    except ValueError:
+                        item.setData(Qt.ItemDataRole.UserRole, 0)
+                elif c == self.OPEN_DATE_COL:
+                    jd = self._date_to_julian(full_text)
+                    item.setData(Qt.ItemDataRole.UserRole, jd)
+
+                # Ausrichtung
+                if c == self.COL_ID:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                elif c == self.OPEN_DATE_COL:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter)
                 else:
-                    chk = QCheckBox()
-                    chk.setText("")  # kein Text in der Zelle, Überschrift kommt aus Header
-                    chk.setEnabled(not self.read_only)
-                    case_id = int(row[0])
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
 
-                    def on_checked(state, cid=case_id, widget=chk):
-                        if state != 2:
-                            return
-                        today = QDate.currentDate().toString("yyyy-MM-dd")
-                        try:
-                            with self.conn:
-                                self.conn.execute(
-                                    "UPDATE cases SET status='Abgeschlossen', date_returned=? WHERE id=?",
-                                    (today, cid)
-                                )
-                                self.conn.execute(
-                                    "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
-                                    ("case_update", "case", cid, json.dumps(
-                                        {"status": "Abgeschlossen", "date_returned": today}, ensure_ascii=False
-                                    ))
-                                )
-                            self.refresh()
-                            self.case_completed.emit(cid)
-                            QMessageBox.information(self, "Erledigt", f"Fall {cid} wurde abgeschlossen.")
-                        except Exception:
-                            enqueue_write({"type": "update_case", "id": cid,
-                                           "date_returned": today, "status": "Abgeschlossen"})
-                            QMessageBox.information(
-                                self, "Offline gespeichert",
-                                "Die DB war nicht erreichbar/gesperrt.\nDie Änderung wurde offline gespeichert und wird beim NÄCHSTEN Start synchronisiert."
-                            )
-                            widget.blockSignals(True); widget.setChecked(False); widget.blockSignals(False)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.table.setItem(r, c, item)
 
-                    chk.stateChanged.connect(on_checked)
-                    self.table.setCellWidget(r, 9, self._centered_checkbox_widget(chk))
+            # Spalte "Erledigt?" (Checkbox)
+            chk = QCheckBox()
+            chk.setEnabled(not self.read_only)
+            chk.setTristate(False)
+            chk.setChecked(False)
+            chk.setText("")
+            chk.setProperty("case_id", int(row[self.COL_ID]))
+            chk.clicked.connect(self._on_done_clicked)
+            self.table.setCellWidget(r, self.COL_DONE, self._centered_checkbox_widget(chk))
+
+            # ID-Zelle nach Alter einfärben
+            self._apply_age_color_to_row(r)
 
         self.table.resizeColumnsToContents()
+        self.table.setSortingEnabled(True)
+
+        # Erstes Mal: Standard-Sortierung -> älteste (am längsten offen) oben, neueste unten
+        if self._first_refresh:
+            self.table.sortItems(self.OPEN_DATE_COL, Qt.SortOrder.AscendingOrder)
+            self._first_refresh = False
+        else:
+            # Benutzer-Sortierung beibehalten
+            self.table.sortItems(sort_section, sort_order)
+
+    # ---------------------------
+    # Abschluss-Checkbox Handler
+    # ---------------------------
+    def _on_done_clicked(self, checked: bool):
+        if not checked:
+            return
+        sender = self.sender()
+        if not isinstance(sender, QCheckBox):
+            return
+        cid = sender.property("case_id")
+        if cid is None:
+            return
+        case_id = int(cid)
+
+        sender.setEnabled(False)
+        today = QDate.currentDate().toString("yyyy-MM-dd")
+
+        try:
+            with self.conn:
+                # Spalten ggf. nachrüsten
+                self._ensure_case_columns(["status","date_returned","closed_by"])
+                self.conn.execute(
+                    "UPDATE cases SET status='Abgeschlossen', date_returned=?, closed_by=? WHERE id=?",
+                    (today, self.current_username, case_id)
+                )
+                self.conn.execute(
+                    "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
+                    ("case_update", "case", case_id, json.dumps(
+                        {"status": "Abgeschlossen", "date_returned": today, "closed_by": self.current_username},
+                        ensure_ascii=False
+                    ))
+                )
+
+            QTimer.singleShot(0, lambda: self._after_done_success(case_id))
+
+        except Exception:
+            enqueue_write({
+                "type": "update_case",
+                "id": case_id,
+                "date_returned": today,
+                "status": "Abgeschlossen",
+                "closed_by": self.current_username,
+            })
+            QTimer.singleShot(0, lambda: self._after_done_offline(sender))
+
+    def _ensure_case_columns(self, names: list[str]) -> None:
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(cases);")
+        existing = {row[1] for row in cur.fetchall()}
+        for n in names:
+            if n not in existing:
+                if n == "status":
+                    self.conn.execute("ALTER TABLE cases ADD COLUMN status TEXT DEFAULT 'In Reparatur'")
+                elif n == "date_returned":
+                    self.conn.execute("ALTER TABLE cases ADD COLUMN date_returned TEXT")
+                elif n == "closed_by":
+                    self.conn.execute("ALTER TABLE cases ADD COLUMN closed_by TEXT")
+                else:
+                    self.conn.execute(f"ALTER TABLE cases ADD COLUMN {n} TEXT")
+
+    def _after_done_success(self, case_id: int):
+        self.case_completed.emit(case_id)
+        self.refresh()
+        QMessageBox.information(self, "Erledigt", f"Fall {case_id} wurde abgeschlossen und verschoben.")
+
+    def _after_done_offline(self, checkbox: QCheckBox):
+        checkbox.blockSignals(True)
+        checkbox.setChecked(False)
+        checkbox.blockSignals(False)
+        checkbox.setEnabled(True)
+        QMessageBox.information(
+            self, "Offline gespeichert",
+            "Die DB war nicht erreichbar/gesperrt.\nDie Änderung wurde offline gespeichert und wird beim NÄCHSTEN Start synchronisiert."
+        )
+
+    # ---------------------------
+    # Farblogik (nur ID-Spalte)
+    # ---------------------------
+    def _apply_age_color_to_row(self, row_index: int) -> None:
+        date_str = self._cell_text(row_index, self.OPEN_DATE_COL)
+        days_open = self._days_since(date_str)
+        brush = self._brush_for_days(days_open)
+        if brush:
+            it = self.table.item(row_index, self.COL_ID)
+            if it:
+                it.setBackground(brush)
+
+    # ---------------------------
+    # Helpers
+    # ---------------------------
+    def _cell_text(self, row: int, col: int) -> Optional[str]:
+        if row < 0 or col < 0 or col >= self.table.columnCount():
+            return None
+        it = self.table.item(row, col)
+        return it.text() if it else None
+
+    def _date_to_julian(self, s: Optional[str]) -> int:
+        if not s:
+            return 10**9
+        try:
+            dt = datetime.strptime(s.strip(), "%Y-%m-%d")
+            return (dt - datetime(1970, 1, 1)).days
+        except Exception:
+            for fmt in DATE_INPUT_FORMATS[1:]:
+                try:
+                    dt = datetime.strptime(s.strip(), fmt)
+                    return (dt - datetime(1970, 1, 1)).days
+                except Exception:
+                    continue
+            return 10**9
+
+    def _days_since(self, date_str: Optional[str]) -> Optional[int]:
+        if not date_str:
+            return None
+        dt = self._parse_date(date_str)
+        if not dt:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return max(0, (now - dt).days)
+
+    def _parse_date(self, s: str) -> Optional[datetime]:
+        s = s.strip()
+        for fmt in DATE_INPUT_FORMATS:
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _brush_for_days(self, days: Optional[int]) -> Optional[QBrush]:
+        if days is None:
+            return None
+        if days <= 30:
+            return QBrush(QColor(0, 200, 0))      # kräftiges Grün
+        if days <= 60:
+            return QBrush(QColor(255, 200, 0))    # kräftiges Gelb/Orange
+        return QBrush(QColor(220, 0, 0))          # kräftiges Rot

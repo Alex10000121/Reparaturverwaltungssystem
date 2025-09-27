@@ -1,6 +1,9 @@
+# db.py
 import sqlite3
 from pathlib import Path
 import bcrypt
+import json
+from datetime import date
 
 DB_PATH = Path(__file__).parent / "resources" / "app.db"
 
@@ -26,6 +29,8 @@ CREATE TABLE IF NOT EXISTS cases (
     reason TEXT,
     date_submitted TEXT,
     date_returned TEXT,
+    created_by TEXT,   -- wer den Fall angelegt hat (Benutzername)
+    closed_by TEXT,    -- wer den Fall abgeschlossen hat (Benutzername)
     notes TEXT
 );
 
@@ -62,33 +67,51 @@ def get_conn():
     with conn:
         conn.executescript(SCHEMA)
 
-        # migrations (older dbs)
+        # ---------- migrations (older dbs) ----------
+        # users
         cols_users = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
         if 'clinics' not in cols_users:
             conn.execute("ALTER TABLE users ADD COLUMN clinics TEXT NOT NULL DEFAULT 'ALL'")
 
+        # cases
         cols_cases = [r[1] for r in conn.execute("PRAGMA table_info(cases)").fetchall()]
         if 'clinic' not in cols_cases:
             conn.execute("ALTER TABLE cases ADD COLUMN clinic TEXT")
             conn.execute("UPDATE cases SET clinic='Neuro' WHERE clinic IS NULL")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_clinic ON cases(clinic)")
+        if 'status' not in cols_cases:
+            conn.execute("ALTER TABLE cases ADD COLUMN status TEXT NOT NULL DEFAULT 'In Reparatur'")
+        if 'date_returned' not in cols_cases:
+            conn.execute("ALTER TABLE cases ADD COLUMN date_returned TEXT")
+        if 'created_by' not in cols_cases:
+            conn.execute("ALTER TABLE cases ADD COLUMN created_by TEXT")
+        if 'closed_by' not in cols_cases:
+            conn.execute("ALTER TABLE cases ADD COLUMN closed_by TEXT")
 
-        # seed users
+        # helpful indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_clinic ON cases(clinic)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status)")
+
+        # ---------- seed data ----------
         if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             for uname, pwd, role, clinics in SEED_USERS:
-                conn.execute("INSERT INTO users(username,password_hash,role,clinics) VALUES(?,?,?,?)",
-                             (uname, _hash(pwd), role, clinics))
-        # seed clinics
+                conn.execute(
+                    "INSERT INTO users(username,password_hash,role,clinics) VALUES(?,?,?,?)",
+                    (uname, _hash(pwd), role, clinics)
+                )
+
         existing = {row[0] for row in conn.execute("SELECT name FROM clinics").fetchall()}
         for name in SEED_CLINICS:
             if name not in existing:
                 conn.execute("INSERT OR IGNORE INTO clinics(name) VALUES (?)", (name,))
     return conn
 
+
 # ---- clinics API ----
 def list_clinics():
     conn = get_conn()
-    return [row[0] for row in conn.execute("SELECT name FROM clinics ORDER BY name COLLATE NOCASE").fetchall()]
+    return [row[0] for row in conn.execute(
+        "SELECT name FROM clinics ORDER BY name COLLATE NOCASE"
+    ).fetchall()]
 
 def add_clinic(name: str):
     name = (name or "").strip()
@@ -97,8 +120,10 @@ def add_clinic(name: str):
     conn = get_conn()
     with conn:
         conn.execute("INSERT INTO clinics(name) VALUES (?)", (name,))
-        conn.execute("INSERT INTO audit_log(action, entity, details) VALUES(?,?,?)",
-                     ("clinic_create","clinic", f'{{"name":"{name}"}}'))
+        conn.execute(
+            "INSERT INTO audit_log(action, entity, details) VALUES(?,?,?)",
+            ("clinic_create","clinic", json.dumps({"name": name}, ensure_ascii=False))
+        )
 
 def delete_clinic(name: str):
     """Löscht eine Klinik, sofern keine Fälle diese Klinik verwenden.
@@ -123,5 +148,59 @@ def delete_clinic(name: str):
                 cur.execute("UPDATE users SET clinics=? WHERE id=?", (new_csv, uid))
         # Klinik löschen
         cur.execute("DELETE FROM clinics WHERE name=?", (name,))
-        cur.execute("INSERT INTO audit_log(action, entity, details) VALUES(?,?,?)",
-                    ("clinic_delete","clinic", f'{{"name":"{name}"}}'))
+        cur.execute(
+            "INSERT INTO audit_log(action, entity, details) VALUES(?,?,?)",
+            ("clinic_delete","clinic", json.dumps({"name": name}, ensure_ascii=False))
+        )
+
+
+# ---- cases API ----
+def add_case(conn: sqlite3.Connection, clinic: str, device_name: str,
+             wave_number: str | None, submitter: str | None, service_provider: str | None,
+             reason: str | None, date_submitted: str | None,
+             created_by: str | None) -> int:
+    """
+    Legt einen neuen Fall an und speichert optional den anlegenden Benutzer (created_by).
+    Gibt die neue ID zurück.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO cases (clinic, device_name, wave_number, submitter, service_provider,
+                           status, reason, date_submitted, created_by)
+        VALUES (?, ?, ?, ?, ?, 'In Reparatur', ?, ?, ?)
+        """,
+        (clinic, device_name, wave_number, submitter, service_provider, reason, date_submitted, created_by)
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def mark_case_done(conn: sqlite3.Connection, case_id: int,
+                   returned_date: str | None = None,
+                   closed_by: str | None = None) -> None:
+    """
+    Setzt den Fall auf 'Abgeschlossen', schreibt das Rückgabedatum und optional 'closed_by'
+    und loggt ins audit_log. returned_date: 'YYYY-MM-DD' (falls None -> heute).
+    """
+    if not returned_date:
+        returned_date = date.today().strftime("%Y-%m-%d")
+
+    with conn:
+        if closed_by is not None:
+            conn.execute(
+                "UPDATE cases SET status='Abgeschlossen', date_returned=?, closed_by=? WHERE id=?",
+                (returned_date, closed_by, case_id)
+            )
+        else:
+            conn.execute(
+                "UPDATE cases SET status='Abgeschlossen', date_returned=? WHERE id=?",
+                (returned_date, case_id)
+            )
+        conn.execute(
+            "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
+            ("case_update", "case", case_id, json.dumps(
+                {"status": "Abgeschlossen", "date_returned": returned_date, "closed_by": closed_by},
+                ensure_ascii=False
+            ))
+        )
