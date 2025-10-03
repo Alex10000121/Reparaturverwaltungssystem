@@ -62,9 +62,25 @@ def _hash(pw: str) -> bytes:
     return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt())
 
 def get_conn():
+    # Ordner für DB sicherstellen (schreibbar, z. B. unter AppData)
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+
+    # Verbindung mit Timeout; check_same_thread=False, wenn du sie threadübergreifend nutzt
+    conn = sqlite3.connect(DB_PATH, timeout=5.0, check_same_thread=False)
+
+    # --- WICHTIG: PRAGMAs VOR der ersten Transaktion setzen ---
+    # WAL = bessere Parallelität, weniger Locks
+    conn.execute("PRAGMA journal_mode=WAL;")
+    # Foreign Keys erzwingen (SQLite ist standardmäßig OFF)
+    conn.execute("PRAGMA foreign_keys=ON;")
+    # Zusätzlicher Busy-Timeout (ergänzt das connect(timeout=...))
+    conn.execute("PRAGMA busy_timeout=5000;")
+    # Haltbarkeit/Performance-Balance für WAL
+    conn.execute("PRAGMA synchronous=NORMAL;")
+
+    # Ab hier alles atomar (Commit/Rollback durch Context Manager)
     with conn:
+        # Schema anwenden (idempotent gestaltet annehmen)
         conn.executescript(SCHEMA)
 
         # ---------- migrations (older dbs) ----------
@@ -87,9 +103,12 @@ def get_conn():
         if 'closed_by' not in cols_cases:
             conn.execute("ALTER TABLE cases ADD COLUMN closed_by TEXT")
 
-        # helpful indexes
+        # ---------- hilfreiche Indizes ----------
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_clinic ON cases(clinic)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status)")
+        # optional sinnvoll:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_status_id ON cases(status, id DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
 
         # ---------- seed data ----------
         if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
@@ -103,7 +122,9 @@ def get_conn():
         for name in SEED_CLINICS:
             if name not in existing:
                 conn.execute("INSERT OR IGNORE INTO clinics(name) VALUES (?)", (name,))
+
     return conn
+
 
 
 # ---- clinics API ----

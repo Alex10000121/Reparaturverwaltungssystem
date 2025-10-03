@@ -1,5 +1,6 @@
-import json, sqlite3
+import json, sqlite3, os, tempfile
 from pathlib import Path
+
 
 def _buffer_path() -> Path:
     return Path(__file__).resolve().parent.parent / "resources" / "buffer_queue.json"
@@ -18,9 +19,17 @@ def _load_buffer() -> list[dict]:
         return []
 
 def _save_buffer(entries: list[dict]) -> None:
-    p = _buffer_path(); p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8")
+    p = _buffer_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
 
+    # Erst in eine temporäre Datei schreiben
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=p.parent, encoding="utf-8") as tmp:
+        json.dump(entries, tmp, indent=2, ensure_ascii=False)
+        tmp.flush()
+        os.fsync(tmp.fileno())  # sicherstellen, dass alles auf Platte ist
+
+    # Atomar ersetzen: entweder die alte Datei oder die neue, nie ein "halbes" File
+    os.replace(tmp.name, p)
 def enqueue_write(payload: dict):
     entries = _load_buffer(); entries.append(payload); _save_buffer(entries)
 
