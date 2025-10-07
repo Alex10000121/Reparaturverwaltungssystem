@@ -45,7 +45,7 @@ exe = EXE(
     # ↓↓↓ hier anpassen ↓↓↓
     upx=False,                 # UPX ausschalten
     upx_exclude=[],
-    console=True,              # Für Debug-Ausgabe aktivieren
+    console=False,              # Für Debug-Ausgabe aktivieren
     # ↑↑↑ nachher wieder False setzen, wenn alles läuft ↑↑↑
 
     runtime_tmpdir=None,
