@@ -225,3 +225,15 @@ def mark_case_done(conn: sqlite3.Connection, case_id: int,
                 ensure_ascii=False
             ))
         )
+
+def delete_case(case_id: int):
+    """Löscht einen Fall. Protokolliert im audit_log."""
+    with get_conn() as c:
+        # optional: Details vor dem Löschen ziehen (für Audit)
+        row = c.execute("SELECT clinic, device_name, wave_number FROM cases WHERE id=?", (case_id,)).fetchone()
+        c.execute("DELETE FROM cases WHERE id=?", (case_id,))
+        c.execute(
+            "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
+            ("case_delete", "case", case_id, json.dumps({"id": case_id, "preview": row}, ensure_ascii=False))
+        )
+
