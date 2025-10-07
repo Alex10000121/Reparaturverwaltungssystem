@@ -1,11 +1,11 @@
 # app/tabs/admin_tab.py
 from typing import Optional, Callable
-import sqlite3, json, bcrypt
+import sqlite3, json, bcrypt, csv
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QLineEdit, QComboBox, QCheckBox,
     QPushButton, QTableWidget, QTableWidgetItem, QGroupBox, QAbstractItemView, QMessageBox, QFrame,
-    QDialog, QDialogButtonBox
+    QDialog, QDialogButtonBox, QFileDialog
 )
 from auth import list_users, add_user, delete_user
 from db import add_clinic  # Kliniken-Insert über eure DB-Kapselung
@@ -33,7 +33,7 @@ class CollapsibleSection(QWidget):
         super().__init__(parent)
         self._btn = QPushButton(("▶ " if start_collapsed else "▼ ") + title)
         self._btn.setCheckable(True)
-        self._btn.setChecked(start_collapsed if False else not start_collapsed)  # defensive: bleibt wie vorher
+        self._btn.setChecked(not start_collapsed)
         self._btn.setStyleSheet("QPushButton { text-align: left; padding: 8px 10px; border-radius: 8px; }")
         self._btn.toggled.connect(self._on_toggled)
         frame = QFrame(); frame.setFrameShape(QFrame.Shape.StyledPanel)
@@ -56,11 +56,12 @@ class CollapsibleSection(QWidget):
 # ---------- AdminTab ----------
 class AdminTab(QWidget):
     """
-    Benutzer- & Klinikverwaltung:
+    Benutzer- & Klinikverwaltung + Audit:
     - Benutzerübersicht (lesen)
     - Benutzer anlegen (Passwort ≥ 8 Zeichen)
     - Benutzer bearbeiten (Rolle/Kliniken ändern, Passwort zurücksetzen, löschen)
     - Kliniken verwalten (hinzufügen/löschen, optionaler Schutz via is_system)
+    - Audit-Log: Tabelle mit Suche/Sortierung + CSV-Export
     - Schutz: kein Self-Delete / keine Self-Demotion
     """
     def __init__(self, conn: sqlite3.Connection, current_user_id: int, on_clinics_changed: Optional[Callable] = None):
@@ -73,7 +74,7 @@ class AdminTab(QWidget):
         except Exception:
             pass
 
-        # 1) Benutzerliste
+        # 1) Benutzerübersicht
         self.gb_list = QGroupBox("Benutzerübersicht")
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["ID", "Benutzername", "Rolle", "Kliniken"])
@@ -138,25 +139,53 @@ class AdminTab(QWidget):
         lay_clin.addLayout(row_add); lay_clin.addLayout(row_del)
         self.sec_clin = CollapsibleSection("Kliniken verwalten", w_clin, True)
 
-        # exklusives Öffnen
-        for sec in (self.sec_add, self.sec_edit, self.sec_clin):
+        # 5) Audit-Log (Tabelle + Suche + Export)
+        self.audit_search = QLineEdit(placeholderText="Im Audit-Log suchen …")
+        self.audit_search.setClearButtonEnabled(True)
+        self.audit_search.textChanged.connect(self.refresh_audit)
+
+        self.audit_table = QTableWidget(0, 7)
+        self.audit_table.setHorizontalHeaderLabels(["ID", "Zeit", "User", "Aktion", "Entity", "Entity-ID", "Details"])
+        self.audit_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.audit_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.audit_table.setSortingEnabled(True)
+        self.audit_table.sortItems(0, Qt.SortOrder.DescendingOrder)
+        self.audit_table.verticalHeader().setDefaultSectionSize(28)
+        self.audit_table.setAlternatingRowColors(True)
+        self.audit_table.setShowGrid(False)
+        self.btn_export_audit = QPushButton("Audit-Log als CSV exportieren…")
+        self.btn_export_audit.clicked.connect(self.on_export_audit_log)
+
+        w_audit = QWidget(); lay_audit = QVBoxLayout(w_audit)
+        lay_audit.addWidget(self.audit_search)
+        lay_audit.addWidget(self.audit_table)
+        lay_audit.addWidget(self.btn_export_audit)
+        self.sec_audit = CollapsibleSection("Audit-Log", w_audit, True)
+
+        # exklusives Öffnen (immer nur eine Sektion offen)
+        for sec in (self.sec_add, self.sec_edit, self.sec_clin, self.sec_audit):
             sec.toggled.connect(lambda ch, s=sec: self._exclusive_open(s, ch))
 
         # Layout
         main = QVBoxLayout(self)
-        main.addWidget(self.gb_list); main.addWidget(self.sec_add)
-        main.addWidget(self.sec_edit); main.addWidget(self.sec_clin); main.addStretch(1)
+        main.addWidget(self.gb_list)
+        main.addWidget(self.sec_add)
+        main.addWidget(self.sec_edit)
+        main.addWidget(self.sec_clin)
+        main.addWidget(self.sec_audit)
+        main.addStretch(1)
 
         # initial
         self.refresh_users()
         self._rebuild_clinic_checkboxes()
         self._reload_clinic_select()
+        self.refresh_audit()
 
     # ---------- interne Helfer ----------
     def _exclusive_open(self, sender: CollapsibleSection, checked: bool):
         if not checked:
             return
-        for sec in (self.sec_add, self.sec_edit, self.sec_clin):
+        for sec in (self.sec_add, self.sec_edit, self.sec_clin, self.sec_audit):
             if sec is not sender:
                 sec.set_expanded(False)
 
@@ -185,13 +214,10 @@ class AdminTab(QWidget):
         while layout.count():
             item = layout.takeAt(0)
             w = item.widget()
-            if w:
-                w.setParent(None)
+            if w: w.setParent(None)
         chk_map.clear()
         for n in names:
-            cb = QCheckBox(n)
-            layout.addWidget(cb)
-            chk_map[n] = cb
+            cb = QCheckBox(n); layout.addWidget(cb); chk_map[n] = cb
         layout.addStretch(1)
 
     def _rebuild_clinic_checkboxes(self):
@@ -216,16 +242,14 @@ class AdminTab(QWidget):
         row = self.table.currentRow()
         return None if row < 0 else int(self.table.item(row, 0).text())
 
-    # ---------- Events ----------
+    # ---------- Auswahl laden ----------
     def _load_selected_into_form(self):
-        """FEHLTE vorher: lädt die aktuell ausgewählte Tabellenzeile in das Bearbeitungsformular."""
         uid = self._selected_user_id()
         if uid is None:
             self.lbl_sel_user.setText("- kein Benutzer ausgewählt -")
             self.role_edit.setEnabled(True); self.role_edit.setCurrentIndex(0)
             self.chk_all_edit.setChecked(False)
-            for cb in self.chk_edit.values():
-                cb.setChecked(False)
+            for cb in self.chk_edit.values(): cb.setChecked(False)
             return
 
         row = self.table.currentRow()
@@ -236,10 +260,8 @@ class AdminTab(QWidget):
         self.lbl_sel_user.setText(f"{uname} (ID {uid})")
 
         idx = self.role_edit.findText(role)
-        if idx >= 0:
-            self.role_edit.setCurrentIndex(idx)
+        if idx >= 0: self.role_edit.setCurrentIndex(idx)
 
-        # sich selbst nicht von Admin wegsetzen
         self.role_edit.setEnabled(not (uid == self.current_user_id and role == "Admin"))
 
         if clinics == "ALL":
@@ -261,54 +283,35 @@ class AdminTab(QWidget):
         pwd = self.pwd_add.text()
         role = self.role_add.currentText()
 
-        if not uname:
-            return msg_warn(self, "Validierung", "Benutzername ist erforderlich.")
-        if len(pwd or "") < 8:
-            return msg_warn(self, "Validierung", "Das Passwort muss mindestens 8 Zeichen lang sein.")
+        if not uname: return msg_warn(self, "Validierung", "Benutzername ist erforderlich.")
+        if len(pwd or "") < 8: return msg_warn(self, "Validierung", "Das Passwort muss mindestens 8 Zeichen lang sein.")
 
-        clinics = "ALL" if self.chk_all_add.isChecked() else ",".join(
-            [n for n, cb in self.chk_add.items() if cb.isChecked()]
-        )
-        if not clinics:
-            return msg_warn(self, "Validierung", "Mindestens eine Klinik wählen – oder 'Alle Kliniken'.")
+        clinics = "ALL" if self.chk_all_add.isChecked() else ",".join([n for n, cb in self.chk_add.items() if cb.isChecked()])
+        if not clinics: return msg_warn(self, "Validierung", "Mindestens eine Klinik wählen – oder 'Alle Kliniken'.")
 
-        try:
-            add_user(uname, pwd, role, clinics)
-        except Exception as e:
-            return msg_warn(self, "Fehler", "Benutzer konnte nicht angelegt werden:\n" + str(e))
+        try: add_user(uname, pwd, role, clinics)
+        except Exception as e: return msg_warn(self, "Fehler", "Benutzer konnte nicht angelegt werden:\n" + str(e))
 
-        # Formular zurücksetzen
-        self.name_add.clear()
-        self.pwd_add.clear()
-        self.chk_all_add.setChecked(False)
-        for cb in self.chk_add.values():
-            cb.setChecked(False)
-
-        self.refresh_users()
-        msg_info(self, "Erstellt", f"Benutzer '{uname}' wurde angelegt.")
+        self.name_add.clear(); self.pwd_add.clear(); self.chk_all_add.setChecked(False)
+        for cb in self.chk_add.values(): cb.setChecked(False)
+        self.refresh_users(); msg_info(self, "Erstellt", f"Benutzer '{uname}' wurde angelegt.")
 
     def on_save_selected(self):
         uid = self._selected_user_id()
-        if uid is None:
-            return msg_info(self, "Auswahl", "Bitte zuerst einen Benutzer auswählen.")
+        if uid is None: return msg_info(self, "Auswahl", "Bitte zuerst einen Benutzer auswählen.")
 
         row = self.table.currentRow()
         current_role = self.table.item(row, 2).text() if row >= 0 else ""
         new_role = self.role_edit.currentText()
-        new_clinics = "ALL" if self.chk_all_edit.isChecked() else ",".join(
-            [n for n, cb in self.chk_edit.items() if cb.isChecked()]
-        )
-        if not new_clinics:
-            return msg_warn(self, "Validierung", "Mindestens eine Klinik wählen – oder 'Alle Kliniken'.")
+        new_clinics = "ALL" if self.chk_all_edit.isChecked() else ",".join([n for n, cb in self.chk_edit.items() if cb.isChecked()])
+        if not new_clinics: return msg_warn(self, "Validierung", "Mindestens eine Klinik wählen – oder 'Alle Kliniken'.")
 
-        # Self-Demotion verhindern
         if uid == self.current_user_id and current_role == "Admin" and new_role != "Admin":
             return msg_warn(self, "Nicht erlaubt", "Du kannst dir selbst nicht die Admin-Rechte entziehen.")
 
         try:
             with self.conn:
                 self.conn.execute("UPDATE users SET role=?, clinics=? WHERE id=?", (new_role, new_clinics, uid))
-                # optionales Audit:
                 self.conn.execute(
                     "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
                     ("user_update", "user", uid, json.dumps({"role": new_role, "clinics": new_clinics}, ensure_ascii=False))
@@ -316,75 +319,49 @@ class AdminTab(QWidget):
         except Exception as e:
             return msg_warn(self, "Fehler", "Speichern fehlgeschlagen:\n" + str(e))
 
-        self.refresh_users()
-        msg_info(self, "Gespeichert", "Rolle & Kliniken aktualisiert.")
+        self.refresh_users(); msg_info(self, "Gespeichert", "Rolle & Kliniken aktualisiert.")
 
     def on_delete_selected(self):
         uid = self._selected_user_id()
-        if uid is None:
-            return msg_info(self, "Auswahl", "Bitte zuerst einen Benutzer auswählen.")
-        # Self-Delete verhindern
-        if uid == self.current_user_id:
-            return msg_warn(self, "Nicht erlaubt", "Du kannst dein eigenes Konto nicht löschen.")
+        if uid is None: return msg_info(self, "Auswahl", "Bitte zuerst einen Benutzer auswählen.")
+        if uid == self.current_user_id: return msg_warn(self, "Nicht erlaubt", "Du kannst dein eigenes Konto nicht löschen.")
 
-        row = self.table.currentRow()
-        uname = self.table.item(row, 1).text() if row >= 0 else str(uid)
-        if not msg_yes(self, "Benutzer löschen", f"Benutzer '{uname}' (ID {uid}) wirklich löschen?"):
-            return
+        row = self.table.currentRow(); uname = self.table.item(row, 1).text() if row >= 0 else str(uid)
+        if not msg_yes(self, "Benutzer löschen", f"Benutzer '{uname}' (ID {uid}) wirklich löschen?"): return
 
-        try:
-            delete_user(uid)
-        except Exception as e:
-            return msg_warn(self, "Fehler", "Löschen fehlgeschlagen:\n" + str(e))
+        try: delete_user(uid)
+        except Exception as e: return msg_warn(self, "Fehler", "Löschen fehlgeschlagen:\n" + str(e))
 
-        self.refresh_users()
-        msg_info(self, "Gelöscht", f"Benutzer '{uname}' wurde gelöscht.")
+        self.refresh_users(); msg_info(self, "Gelöscht", f"Benutzer '{uname}' wurde gelöscht.")
 
     def on_reset_password(self):
         uid = self._selected_user_id()
-        if uid is None:
-            return msg_info(self, "Auswahl", "Bitte zuerst einen Benutzer auswählen.")
-        row = self.table.currentRow()
-        uname = self.table.item(row, 1).text() if row >= 0 else f"ID {uid}"
+        if uid is None: return msg_info(self, "Auswahl", "Bitte zuerst einen Benutzer auswählen.")
+        row = self.table.currentRow(); uname = self.table.item(row, 1).text() if row >= 0 else f"ID {uid}"
 
-        # Dialog
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"Passwort zurücksetzen – {uname}")
+        dlg = QDialog(self); dlg.setWindowTitle(f"Passwort zurücksetzen – {uname}")
         le_pw1, le_pw2 = QLineEdit(), QLineEdit()
-        for le in (le_pw1, le_pw2):
-            le.setEchoMode(QLineEdit.EchoMode.Password)
-        le_pw1.setPlaceholderText("Neues Passwort (min. 8 Zeichen)")
-        le_pw2.setPlaceholderText("Wiederholen")
-        form = QFormLayout(dlg)
-        form.addRow("Neues Passwort:", le_pw1)
-        form.addRow("Wiederholen:", le_pw2)
+        for le in (le_pw1, le_pw2): le.setEchoMode(QLineEdit.EchoMode.Password)
+        le_pw1.setPlaceholderText("Neues Passwort (min. 8 Zeichen)"); le_pw2.setPlaceholderText("Wiederholen")
+        form = QFormLayout(dlg); form.addRow("Neues Passwort:", le_pw1); form.addRow("Wiederholen:", le_pw2)
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dlg)
-        form.addRow(btns)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-
+        form.addRow(btns); btns.accepted.connect(dlg.accept); btns.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
         pw1, pw2 = le_pw1.text().strip(), le_pw2.text().strip()
-        if len(pw1) < 8:
-            return msg_warn(self, "Ungültig", "Das Passwort muss mindestens 8 Zeichen lang sein.")
-        if pw1 != pw2:
-            return msg_warn(self, "Ungültig", "Die Passwörter stimmen nicht überein.")
-        if not msg_yes(self, "Bestätigen", f"Passwort für Benutzer „{uname}“ wirklich zurücksetzen?"):
-            return
+        if len(pw1) < 8: return msg_warn(self, "Ungültig", "Das Passwort muss mindestens 8 Zeichen lang sein.")
+        if pw1 != pw2: return msg_warn(self, "Ungültig", "Die Passwörter stimmen nicht überein.")
+        if not msg_yes(self, "Bestätigen", f"Passwort für Benutzer „{uname}“ wirklich zurücksetzen?"): return
 
         hashed = bcrypt.hashpw(pw1.encode("utf-8"), bcrypt.gensalt())
         try:
             with self.conn:
                 self.conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hashed, uid))
-                # optionales Audit:
                 self.conn.execute(
                     "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
                     ("user_password_reset", "user", uid, json.dumps({"username": uname}, ensure_ascii=False))
                 )
         except Exception as e:
             return msg_warn(self, "Fehler", "Passwort konnte nicht gesetzt werden:\n" + str(e))
-
         msg_info(self, "Erfolg", f"Passwort für „{uname}“ wurde zurückgesetzt.")
 
     # ---------- Kliniken ----------
@@ -396,51 +373,101 @@ class AdminTab(QWidget):
 
     def on_add_clinic(self):
         name = self.new_clinic_name.text().strip()
-        if not name:
-            return msg_info(self, "Eingabe", "Bitte Klinikname eingeben.")
-        try:
-            add_clinic(name)
-        except Exception as e:
-            return msg_warn(self, "Fehler", "Klinik konnte nicht angelegt werden:\n" + str(e))
-        self.new_clinic_name.clear()
-        self._after_clinic_change()
-        msg_info(self, "Klinik", f"Klinik '{name}' hinzugefügt.")
+        if not name: return msg_info(self, "Eingabe", "Bitte Klinikname eingeben.")
+        try: add_clinic(name)
+        except Exception as e: return msg_warn(self, "Fehler", "Klinik konnte nicht angelegt werden:\n" + str(e))
+        self.new_clinic_name.clear(); self._after_clinic_change(); msg_info(self, "Klinik", f"Klinik '{name}' hinzugefügt.")
 
     def on_delete_clinic(self):
         idx = self.clinic_delete_select.currentIndex()
-        if idx < 0:
-            return msg_info(self, "Auswahl", "Bitte Klinik auswählen.")
+        if idx < 0: return msg_info(self, "Auswahl", "Bitte Klinik auswählen.")
         clinic_pk = self.clinic_delete_select.itemData(idx, Qt.ItemDataRole.UserRole)
         label = self.clinic_delete_select.currentText().strip()
         name = label.replace(" (🔒)", "")
-        if clinic_pk is None:
-            return msg_err(self, "Fehler", "Für die gewählte Klinik ist keine PK-ID hinterlegt.")
+        if clinic_pk is None: return msg_err(self, "Fehler", "Für die gewählte Klinik ist keine PK-ID hinterlegt.")
 
         pk, has_sys = self._clinics_schema()
-
-        # Systemschutz prüfen
         if has_sys:
             _, rows = run_sql(self.conn, f"SELECT is_system FROM clinics WHERE {pk}=?", (clinic_pk,), True)
             if rows and int(rows[0][0]) == 1:
                 return msg_info(self, "Geschützt", f"Die Klinik '{name}' ist geschützt und kann nicht gelöscht werden.")
 
-        if not msg_yes(self, "Klinik löschen", f"Klinik '{name}' wirklich löschen?"):
-            return
+        if not msg_yes(self, "Klinik löschen", f"Klinik '{name}' wirklich löschen?"): return
 
         try:
             affected, _ = run_sql(self.conn, f"DELETE FROM clinics WHERE {pk}=?", (clinic_pk,))
         except sqlite3.IntegrityError as e:
-            return msg_err(
-                self, "Löschen nicht möglich",
-                "Diese Klinik ist noch verknüpft (z. B. Benutzer/Fälle).\n"
-                "Bitte Verknüpfungen lösen oder ON DELETE-Regeln anpassen.\n\nDetails:\n" + str(e)
-            )
+            return msg_err(self, "Löschen nicht möglich",
+                           "Diese Klinik ist noch verknüpft (z. B. Benutzer/Fälle).\n"
+                           "Bitte Verknüpfungen lösen oder ON DELETE-Regeln anpassen.\n\nDetails:\n" + str(e))
         except Exception as e:
             return msg_warn(self, "Fehler", "Klinik konnte nicht gelöscht werden:\n" + str(e))
 
         if affected == 0:
-            self._reload_clinic_select()
-            return msg_warn(self, "Nicht gelöscht", "Die Klinik wurde nicht gefunden oder bereits entfernt.")
+            self._reload_clinic_select(); return msg_warn(self, "Nicht gelöscht", "Die Klinik wurde nicht gefunden oder bereits entfernt.")
 
-        self._after_clinic_change()
-        msg_info(self, "Klinik", f"Klinik '{name}' gelöscht.")
+        self._after_clinic_change(); msg_info(self, "Klinik", f"Klinik '{name}' gelöscht.")
+
+    # ---------- Audit-Log ----------
+    def _fetch_audit(self):
+        # Username per LEFT JOIN; fallback auf user_id falls NULL
+        cur = self.conn.cursor()
+        try:
+            cur.execute("""
+                SELECT a.id, a.ts, COALESCE(u.username, CAST(a.user_id AS TEXT)) AS username,
+                       a.action, a.entity, a.entity_id, a.details
+                FROM audit_log a
+                LEFT JOIN users u ON u.id = a.user_id
+                ORDER BY a.id DESC
+            """)
+            return cur.fetchall()
+        except Exception:
+            # Fallback ohne JOIN
+            cur.execute("""
+                SELECT id, ts, COALESCE(CAST(user_id AS TEXT), ''), action, entity, entity_id, details
+                FROM audit_log ORDER BY id DESC
+            """)
+            return cur.fetchall()
+
+    def refresh_audit(self):
+        rows = self._fetch_audit()
+        q = self.audit_search.text().strip().lower()
+        if q:
+            def hit(r):
+                return any((str(x or "").lower().find(q) >= 0) for x in r)
+            rows = [r for r in rows if hit(r)]
+
+        self.audit_table.setSortingEnabled(False)
+        self.audit_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, val in enumerate(row):
+                text = "" if val is None else str(val)
+                item = QTableWidgetItem(text)
+                if c in (0, 5):  # id, entity_id
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    try:
+                        item.setData(Qt.ItemDataRole.UserRole, int(text or "0"))
+                    except ValueError:
+                        item.setData(Qt.ItemDataRole.UserRole, 0)
+                else:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.audit_table.setItem(r, c, item)
+
+        self.audit_table.resizeColumnsToContents()
+        self.audit_table.setSortingEnabled(True)
+        # Standard: ID absteigend (neueste oben)
+        self.audit_table.sortItems(0, Qt.SortOrder.DescendingOrder)
+
+    def on_export_audit_log(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Audit-Log als CSV speichern", "audit_log.csv", "CSV (*.csv)")
+        if not path: return
+        try:
+            rows = self._fetch_audit()
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f, delimiter=";")
+                w.writerow(["id", "ts", "user", "action", "entity", "entity_id", "details"])
+                w.writerows(rows)
+        except Exception as e:
+            return msg_warn(self, "Fehler", "Audit-Log konnte nicht exportiert werden:\n" + str(e))
+        msg_info(self, "Export", f"Audit-Log wurde exportiert nach:\n{path}")
