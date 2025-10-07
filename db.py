@@ -236,4 +236,19 @@ def delete_case(case_id: int):
             "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
             ("case_delete", "case", case_id, json.dumps({"id": case_id, "preview": row}, ensure_ascii=False))
         )
+def set_user_password(user_id: int, new_plain: str) -> None:
+    """
+    Setzt das Passwort eines Benutzers auf 'new_plain'.
+    Speichert bcrypt-Hash in users.password_hash (BLOB) und protokolliert im audit_log.
+    """
+    new_plain = (new_plain or "").strip()
+    if len(new_plain) < 8:
+        raise ValueError("Das Passwort muss mindestens 8 Zeichen lang sein.")
+    hpw = bcrypt.hashpw(new_plain.encode("utf-8"), bcrypt.gensalt())
 
+    with get_conn() as c:
+        c.execute("UPDATE users SET password_hash=? WHERE id=?", (hpw, user_id))
+        c.execute(
+            "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
+            ("user_password_reset", "user", user_id, json.dumps({"user_id": user_id}, ensure_ascii=False))
+        )
