@@ -37,6 +37,6 @@ Diese Applikation dient zur Verwaltung von Reparaturen medizinischer Geräte.
 
 Beispiel mit PyInstaller:
 ```bash
-pyinstaller app/main.py -F -w --collect-all PyQt6       --add-data "resources/buffer_queue.json;resources"       --icon=icons/app.ico       -n ReparaturManager
+ python -m PyInstaller --clean --noconfirm ReparaturManager.spec
 ```
 
