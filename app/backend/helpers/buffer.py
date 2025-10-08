@@ -1,6 +1,5 @@
 # Offline-Puffer für DB-Schreibvorgänge (atomar, robust, schema-sicher)
-# (Ergänzt 'created_by' aus 'submitter' für JSON-Fälle; DB-Schema wird NICHT verändert.)
-
+# Unterstützt insert_case (mit created_by), update_case (mit closed_by), delete_case.
 from __future__ import annotations
 
 import json
@@ -17,8 +16,8 @@ from typing import List, Dict, Tuple
 
 def _buffer_path() -> Path:
     """
-    Pfad zur JSON-Pufferdatei. Liegt relativ zu diesem Modul unter:
-    app/backend/resources/buffer_queue.json
+    Pfad zur JSON-Pufferdatei.
+    Liegt relativ zu diesem Modul unter: app/backend/resources/buffer_queue.json
     """
     return Path(__file__).resolve().parent.parent / "resources" / "buffer_queue.json"
 
@@ -64,7 +63,8 @@ def _save_buffer(entries: List[Dict]) -> None:
 def _normalize_entry(entry: Dict) -> Dict:
     """
     Ergänzt fehlende Felder sinnvoll, ohne DB-Schema zu ändern.
-    - Für insert_case: setzt 'created_by' aus 'submitter' (falls nicht vorhanden).
+    - insert_case: setzt 'created_by' aus submitter (oder alternativen Feldern), falls fehlt.
+    - update_case/delete_case: keine automatische Ableitung nötig.
     """
     if entry.get("type") == "insert_case":
         if not entry.get("created_by"):
@@ -93,13 +93,21 @@ def enqueue_write(payload: Dict) -> None:
 
 def _cases_columns(conn: sqlite3.Connection) -> set[str]:
     """
-    Liest Spaltennamen der Tabelle 'cases', um Inserts passend zum aktuellen Schema
+    Liest Spaltennamen der Tabelle 'cases', um Inserts/Updates passend zum aktuellen Schema
     zu formulieren (keine Schema-Änderung).
     """
     cols: set[str] = set()
     for _cid, name, *_ in conn.execute("PRAGMA table_info(cases)"):
         cols.add(name)
     return cols
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower(?) LIMIT 1",
+        (name,)
+    ).fetchone()
+    return row is not None
 
 
 # ------------------------------------------------------------
@@ -175,11 +183,49 @@ def _apply_buffer_entry(conn: sqlite3.Connection, entry: Dict) -> None:
             )
 
     elif etype == "update_case":
+        cols = _cases_columns(conn)
+
+        # Dynamisch SET-Klausel bauen: status und date_returned immer, closed_by optional
+        set_cols: List[str] = []
+        params: List[object] = []
+
+        if "status" in cols and "status" in entry:
+            set_cols.append("status=?")
+            params.append(entry.get("status"))
+
+        if "date_returned" in cols and "date_returned" in entry:
+            set_cols.append("date_returned=?")
+            params.append(entry.get("date_returned"))
+
+        # Ergänzung: closed_by mit übernehmen, wenn vorhanden und Spalte existiert
+        if "closed_by" in cols and entry.get("closed_by") is not None:
+            set_cols.append("closed_by=?")
+            params.append(entry.get("closed_by"))
+
+        if not set_cols:
+            # Nichts zu aktualisieren – still ignorieren
+            return
+
+        params.append(entry["id"])  # WHERE id=?
+
         with conn:
             conn.execute(
-                "UPDATE cases SET status=?, date_returned=? WHERE id=?",
-                (entry.get("status"), entry.get("date_returned"), entry["id"])
+                f"UPDATE cases SET {', '.join(set_cols)} WHERE id=?",
+                tuple(params)
             )
+
+    elif etype == "delete_case":
+        case_id = entry["id"]
+        with conn:
+            conn.execute("DELETE FROM cases WHERE id=?", (case_id,))
+            # Optionales Audit, falls Tabelle vorhanden
+            if _table_exists(conn, "audit_log"):
+                details = {"deleted_by": entry.get("deleted_by")}
+                conn.execute(
+                    "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
+                    ("case_delete", "case", case_id, json.dumps(details, ensure_ascii=False))
+                )
+
     else:
         raise ValueError(f"Unbekannter Buffer-Typ: {etype}")
 

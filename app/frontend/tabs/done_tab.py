@@ -251,10 +251,11 @@ class DoneTab(QWidget):
             self.case_deleted.emit(case_id)
             self.refresh()
         except Exception:
-            enqueue_write({"type": "delete_case", "id": case_id})
-            QMessageBox.information(
-                self, "Offline gespeichert",
-                "Die DB war nicht erreichbar.\nDie Löschung wird beim nächsten Start synchronisiert."
+            QMessageBox.warning(
+                self,
+                "Löschen nicht möglich",
+                "Löschung nicht möglich, weil die Datenbank gesperrt ist.\n"
+                "Bitte später erneut versuchen."
             )
 
     # ---------- Helpers ----------
