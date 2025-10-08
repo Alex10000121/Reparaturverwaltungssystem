@@ -1,8 +1,8 @@
 import json, sqlite3
 from PyQt6.QtCore import QDate
-import app.buffer as buffer_mod
-from app.tabs.create_tab import CreateTab
-from app.buffer import sync_buffer_once
+import app.backend.helpers.buffer as buffer_mod
+from app.frontend.tabs.create_tab import CreateTab
+from app.backend.helpers.buffer import sync_buffer_once
 
 class ProxyConn:
     """Wrappt eine echte sqlite3.Connection und simuliert 'database is locked'

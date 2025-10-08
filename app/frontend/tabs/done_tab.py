@@ -11,8 +11,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QStyle
 )
 
-from app.helpers import clinics_of_user
-from app.buffer import enqueue_write
+from app.backend.helpers.helpers import clinics_of_user
+from app.backend.helpers.buffer import enqueue_write
 
 
 class DoneTab(QWidget):

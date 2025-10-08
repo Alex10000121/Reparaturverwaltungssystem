@@ -1,4 +1,4 @@
-import sys, pathlib, sqlite3, json, pytest
+import sys, pathlib, sqlite3, pytest
 
 # --- Projekt-Root importierbar machen ---
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -49,7 +49,7 @@ def tmp_db_path(tmp_path_factory):
 @pytest.fixture(autouse=True)
 def patch_db_auth_and_buffer(tmp_db_path, monkeypatch, tmp_path):
     # db.get_conn auf die Test-DB umbiegen
-    import db as real_db
+    from app.backend.db.db import db as real_db
     def get_conn_override():
         conn = sqlite3.connect(tmp_db_path)
         conn.execute("PRAGMA foreign_keys=ON")
@@ -71,7 +71,7 @@ def patch_db_auth_and_buffer(tmp_db_path, monkeypatch, tmp_path):
     monkeypatch.setattr(real_db, "delete_clinic", delete_clinic, raising=False)
 
     # auth-Funktionen auf Test-DB umbiegen
-    import auth as real_auth
+    from app.backend import auth as real_auth
     def add_user(username, password, role, clinics):
         with get_conn_override() as c:
             c.execute("INSERT INTO users(username,password,role,clinics) VALUES(?,?,?,?)",
@@ -93,7 +93,7 @@ def patch_db_auth_and_buffer(tmp_db_path, monkeypatch, tmp_path):
     monkeypatch.setattr(real_auth, "authenticate", authenticate, raising=True)
 
     # Buffer-Datei auf temporären Ort umbiegen
-    import app.buffer as buffer_mod
+    import app.backend.helpers.buffer as buffer_mod
     buf_path = tmp_path / "buffer_queue.json"
     def patched_buffer_path():
         return buf_path

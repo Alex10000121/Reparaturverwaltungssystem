@@ -3,14 +3,14 @@ import sys, sqlite3, csv
 from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar, QStatusBar, QFileDialog, QMessageBox
 from PyQt6.QtGui import QAction
 from PyQt6.QtCore import Qt
-from db import get_conn
-from app.theme import apply_app_theme, apply_system_theme
-from app.buffer import sync_buffer_once
-from app.widgets.login import Login
-from app.tabs.create_tab import CreateTab
-from app.tabs.open_tab import OpenTab
-from app.tabs.done_tab import DoneTab
-from app.tabs.admin_tab import AdminTab
+from app.backend.db.db import get_conn
+from app.frontend.theme import apply_app_theme, apply_system_theme
+from app.backend.helpers.buffer import sync_buffer_once
+from app.frontend.widgets.login import Login
+from app.frontend.tabs.create_tab import CreateTab
+from app.frontend.tabs.open_tab import OpenTab
+from app.frontend.tabs.done_tab import DoneTab
+from app.frontend.tabs.admin_tab import AdminTab
 
 class Main(QMainWindow):
     def __init__(self, user_id: int, role: str, clinics_csv: str, username: str):

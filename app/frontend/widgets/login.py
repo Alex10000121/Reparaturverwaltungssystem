@@ -1,6 +1,6 @@
 from typing import Optional, Tuple
 from PyQt6.QtWidgets import QWidget, QLineEdit, QPushButton, QFormLayout, QVBoxLayout, QMessageBox
-from auth import authenticate
+from app.backend.auth import authenticate
 
 class Login(QWidget):
     def __init__(self):

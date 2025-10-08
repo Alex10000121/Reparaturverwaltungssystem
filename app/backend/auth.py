@@ -5,7 +5,7 @@ import bcrypt
 import json
 import datetime
 
-from db import get_conn
+from app.backend.db.db import get_conn
 
 # --- Konfiguration ---
 MAX_FAILED_ATTEMPTS = 5          # nach so vielen Fehlversuchen ...

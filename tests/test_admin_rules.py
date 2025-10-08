@@ -1,4 +1,4 @@
-from app.tabs.admin_tab import AdminTab
+from app.frontend.tabs.admin_tab import AdminTab
 
 def test_admin_cannot_demote_self(qtbot, conn):
     tab = AdminTab(conn, current_user_id=1)

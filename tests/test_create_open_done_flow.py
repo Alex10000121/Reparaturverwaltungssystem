@@ -1,8 +1,8 @@
 from PyQt6.QtCore import QDate, Qt
 from PyQt6.QtWidgets import QCheckBox
-from app.tabs.create_tab import CreateTab
-from app.tabs.open_tab import OpenTab
-from app.tabs.done_tab import DoneTab
+from app.frontend.tabs.create_tab import CreateTab
+from app.frontend.tabs.open_tab import OpenTab
+from app.frontend.tabs.done_tab import DoneTab
 
 def _find_checkbox(wrapper):
     # unsere Tabs verwenden einen zentrierenden Wrapper -> suche QCheckBox darin

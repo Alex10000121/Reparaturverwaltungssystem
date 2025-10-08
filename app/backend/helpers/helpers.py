@@ -1,5 +1,5 @@
 from typing import Optional, List
-from db import list_clinics
+from app.backend.db.db import list_clinics
 
 def clinics_of_user(role: str, clinics_csv: str) -> Optional[List[str]]:
     if role == "Admin" or clinics_csv == "ALL":

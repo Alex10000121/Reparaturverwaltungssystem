@@ -1,4 +1,4 @@
-from app.tabs.open_tab import OpenTab
+from app.frontend.tabs.open_tab import OpenTab
 
 def _insert_case(conn, clinic, device):
     with conn:

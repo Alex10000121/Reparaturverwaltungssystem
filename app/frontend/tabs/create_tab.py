@@ -6,8 +6,8 @@ from PyQt6.QtWidgets import (
     QWidget, QLineEdit, QTextEdit, QComboBox, QDateEdit, QPushButton,
     QVBoxLayout, QFormLayout, QMessageBox
 )
-from app.helpers import clinic_choices_for
-from app.buffer import enqueue_write
+from app.backend.helpers.helpers import clinic_choices_for
+from app.backend.helpers.buffer import enqueue_write
 
 MAX_INPUT_CHARS = 30  # harte Obergrenze für *alle* Eingabefelder
 

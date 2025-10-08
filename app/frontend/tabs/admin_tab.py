@@ -7,8 +7,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QGroupBox, QAbstractItemView, QMessageBox, QFrame,
     QDialog, QDialogButtonBox, QFileDialog
 )
-from auth import list_users, add_user, delete_user
-from db import add_clinic  # Kliniken-Insert über eure DB-Kapselung
+from app.backend.auth import list_users, add_user, delete_user
+from app.backend.db.db import add_clinic  # Kliniken-Insert über eure DB-Kapselung
 
 
 # ---------- kompakte UI-/DB-Helfer ----------

@@ -11,8 +11,8 @@ from PyQt6.QtWidgets import (
     QCheckBox, QAbstractItemView, QMessageBox, QHBoxLayout
 )
 
-from app.helpers import clinics_of_user
-from app.buffer import enqueue_write
+from app.backend.helpers.helpers import clinics_of_user
+from app.backend.helpers.buffer import enqueue_write
 
 DATE_INPUT_FORMATS = (
     "%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
