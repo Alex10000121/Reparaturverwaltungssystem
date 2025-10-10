@@ -84,7 +84,7 @@ class OpenTab(QWidget):
         self.table.setShowGrid(False)
         self.table.setSortingEnabled(True)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 
         # Header einstellen
         hdr = self.table.horizontalHeader()
@@ -92,6 +92,8 @@ class OpenTab(QWidget):
         hdr.setStretchLastSection(True)                                    # letzte Spalte füllt Rest
         hdr.setTextElideMode(Qt.TextElideMode.ElideNone)                   # Header nie abschneiden
         hdr.setMinimumSectionSize(50)
+        # Bei Sortwechsel erste Spalte neu vermessen und fixieren (Sortpfeil kann Breite ändern)
+        hdr.sortIndicatorChanged.connect(lambda *_: self._lock_first_header_width())
 
         lay = QVBoxLayout(self)
         lay.addLayout(top)
@@ -99,15 +101,17 @@ class OpenTab(QWidget):
 
         self._first_refresh = True
         self.refresh()
+        # Direkt nach dem ersten Aufbau nochmals fixieren
+        self._lock_first_header_width()
 
     # ---------------- Schema / Meta ----------------
     def _detect_column_exprs(self) -> tuple[str, str]:
         try:
             cur = self.conn.cursor()
+            cur.execute("PRAGMA table_info(cases);")
+            cols = {row[1] for row in cur.fetchall()}
         except Exception:
-            return "''", "''"
-        cur.execute("PRAGMA table_info(cases);")
-        cols = {row[1] for row in cur.fetchall()}
+            cols = set()
         created_expr = "created_by" if "created_by" in cols else "''"
         notes_expr = "notes" if "notes" in cols else "''"
         return created_expr, notes_expr
@@ -187,6 +191,7 @@ class OpenTab(QWidget):
                         item.setData(Qt.ItemDataRole.UserRole, self._date_to_julian(full_text))
                         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     else:
+                        # linksbündig für alle übrigen Spalten
                         item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
 
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -217,33 +222,31 @@ class OpenTab(QWidget):
             self.table.sortItems(sort_section, sort_order)
 
     def _lock_first_header_width(self):
-        """Sorgt dafür, dass 'Tage offen' nie abgeschnitten wird, auch wenn wenig Platz vorhanden ist."""
+        """Sorgt dafür, dass 'Tage offen' nie abgeschnitten wird, auch mit Sortpfeil."""
         hdr = self.table.horizontalHeader()
 
-        # Kurz auf ResizeToContents setzen, damit Qt eine Basis berechnet
+        # kurz automatisch messen lassen
         hdr.setSectionResizeMode(self.COL_TAGE, QHeaderView.ResizeMode.ResizeToContents)
         self.table.resizeColumnToContents(self.COL_TAGE)
 
-        # Benötigte Breite präzise bestimmen
         need = self._needed_header_width(self.COL_TAGE)
-        cur = self.table.columnWidth(self.COL_TAGE)
-        if cur < need:
-            hdr.resizeSection(self.COL_TAGE, need)
+        # harte Untergrenze (passt zu Standard-Themes; gern auf 190 oder 200 erhöhen, wenn nötig)
+        MIN_HEADER0 = 180
+        width = max(self.table.columnWidth(self.COL_TAGE), need, MIN_HEADER0)
 
-        # Nun fixieren, damit andere Spalten diese Breite nicht wieder verkleinern
+        # fixieren, damit andere Spalten diese Breite nicht wieder verkleinern
         hdr.setSectionResizeMode(self.COL_TAGE, QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(self.COL_TAGE, width)
 
-        # Die übrigen Spalten dürfen weiter automatisch arbeiten
+        # übrige Spalten weiterhin dynamisch
         for c in range(self.table.columnCount()):
-            if c == self.COL_TAGE:
-                continue
-            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+            if c != self.COL_TAGE:
+                hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
 
-        # Optional: letzte Spalte dehnen
         hdr.setStretchLastSection(True)
 
     def _needed_header_width(self, col: int) -> int:
-        """Berechnet die Breite, die der Headertext (mit Sort-Indikator und Padding) real braucht."""
+        """Breite, die der Headertext real braucht (inkl. Sortpfeil nur wenn aktiv) und Padding."""
         hdr = self.table.horizontalHeader()
         item = self.table.horizontalHeaderItem(col)
         if not item:
@@ -253,15 +256,16 @@ class OpenTab(QWidget):
         fm: QFontMetrics = hdr.fontMetrics()
         text_w = fm.horizontalAdvance(item.text())
 
-        # Sort-Indikator berücksichtigen, wenn sichtbar
-        sort_w = self.style().pixelMetric(QStyle.PixelMetric.PM_HeaderMarkSize, None, hdr) or 0
-        # etwas Puffer fuer linkes/rechtes Padding und Rundungen
-        padding = 28
-        extra = 12
+        # Sortpfeil nur berücksichtigen, wenn diese Spalte die aktuelle Sortspalte ist
+        sort_w = 0
+        if hdr.sortIndicatorSection() == col:
+            sort_w = self.style().pixelMetric(QStyle.PixelMetric.PM_HeaderMarkSize, None, hdr) or 0
 
-        need = text_w + sort_w + padding + extra
-        # harte Untergrenze, damit der Inhalt in der Spalte nicht gequetscht wirkt
-        return max(need, 120)
+        # etwas Puffer für linkes/rechtes Padding und Reserve
+        padding_lr = 32
+        extra = 16
+
+        return text_w + sort_w + padding_lr + extra
 
     # ---------------- Export ----------------
     def _export_open_cases(self):
