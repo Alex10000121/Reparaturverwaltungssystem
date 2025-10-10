@@ -1,4 +1,5 @@
 # app/tabs/done_tab.py
+import csv
 import json
 import sqlite3
 from datetime import datetime
@@ -8,7 +9,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
     QWidget, QLineEdit, QVBoxLayout, QTableWidget, QTableWidgetItem,
     QAbstractItemView, QCheckBox, QMessageBox, QHBoxLayout,
-    QPushButton, QStyle
+    QPushButton, QStyle, QHeaderView, QFileDialog, QSizePolicy
 )
 
 from app.backend.helpers.helpers import clinics_of_user
@@ -16,11 +17,16 @@ from app.backend.helpers.buffer import enqueue_write
 
 
 class DoneTab(QWidget):
-    """Abgeschlossene Fälle mit optionalem Löschen (nur Admin sichtbar)."""
     case_reopened = pyqtSignal(int)
     case_deleted = pyqtSignal(int)
 
-    COL_ID = 0
+    COL_TAGE = 0
+    COL_KLINIK = 1
+    COL_GERAET = 2
+    COL_WAVE = 3
+    COL_ABGEBER = 4
+    COL_TECHNIKER = 5
+    COL_GRUND = 6
     COL_ABGABE = 7
     COL_ZURUECK = 8
     COL_CREATEDBY = 9
@@ -38,18 +44,28 @@ class DoneTab(QWidget):
 
         self._created_by_expr, self._closed_by_expr, self._notes_expr = self._detect_column_exprs()
 
-        self.search = QLineEdit(placeholderText="Suchen ...")
+        self.search = QLineEdit(placeholderText="Suchen …")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.refresh)
+        self.search.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.btn_export = QPushButton("Exportieren")
+        self.btn_export.setFixedHeight(32)
+        self.btn_export.clicked.connect(self._export_done_cases)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addWidget(self.search, stretch=1)
+        top.addWidget(self.btn_export)
 
         self.table = QTableWidget()
         self.table.setColumnCount(14)
         self.table.setHorizontalHeaderLabels([
-            "ID", "Klinik", "Gerät", "Wave- / Seriennummer", "Abgeber", "Techniker",
+            "Tage in Reparatur", "Klinik", "Gerät", "Wave- / Seriennummer", "Abgeber", "Techniker",
             "Grund", "Abgabe", "Zurück", "Angelegt von", "Erledigt von", "Notizen",
             "Wieder öffnen?", "Löschen"
         ])
-        self.table.setSelectionBehavior(self.table.SelectionBehavior.SelectRows)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table.verticalHeader().setDefaultSectionSize(32)
@@ -57,18 +73,25 @@ class DoneTab(QWidget):
         self.table.setShowGrid(False)
         self.table.setSortingEnabled(True)
 
-        # Spalte "Löschen" ausblenden, wenn kein Admin
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(self.COL_TAGE, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(self.COL_ABGABE, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(self.COL_ZURUECK, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setMinimumSectionSize(70)
+        self.table.setColumnWidth(self.COL_TAGE, 165)
+        self.table.setColumnWidth(self.COL_ABGABE, 130)
+        self.table.setColumnWidth(self.COL_ZURUECK, 130)
+
         if not self.is_admin:
             self.table.setColumnHidden(self.COL_DELETE, True)
 
         lay = QVBoxLayout(self)
-        lay.addWidget(self.search)
+        lay.addLayout(top)
         lay.addWidget(self.table)
 
         self._first_refresh = True
         self.refresh()
 
-    # ---------- Schema ----------
     def _detect_column_exprs(self) -> tuple[str, str, str]:
         try:
             cur = self.conn.cursor()
@@ -81,7 +104,6 @@ class DoneTab(QWidget):
         notes_expr   = "notes"      if "notes"      in cols else "''"
         return created_expr, closed_expr, notes_expr
 
-    # ---------- Datenbeschaffung ----------
     def _scope_filter_sql(self) -> tuple[str, tuple]:
         if self.allowed is None:
             return "WHERE status='Abgeschlossen'", ()
@@ -103,7 +125,6 @@ class DoneTab(QWidget):
         ).fetchall()
         return rows
 
-    # ---------- UI ----------
     def _centered_widget(self, w) -> QWidget:
         wrapper = QWidget()
         lay = QHBoxLayout(wrapper)
@@ -114,13 +135,14 @@ class DoneTab(QWidget):
 
     def refresh(self):
         rows = self._fetch()
+
         q = self.search.text().strip().lower()
         if q:
             rows = [r for r in rows if any(
                 (str(x or "").lower().find(q) >= 0)
                 for x in (
-                    r[1], r[2], r[3], r[4], r[5], r[6],
-                    r[self.COL_ABGABE], r[self.COL_ZURUECK],
+                    r[self.COL_KLINIK], r[self.COL_GERAET], r[self.COL_WAVE], r[self.COL_ABGEBER],
+                    r[self.COL_TECHNIKER], r[self.COL_GRUND], r[self.COL_ABGABE], r[self.COL_ZURUECK],
                     r[self.COL_CREATEDBY], r[self.COL_CLOSEDBY], r[self.COL_NOTES]
                 )
             )]
@@ -133,56 +155,94 @@ class DoneTab(QWidget):
         self.table.setRowCount(len(rows))
 
         for r, row in enumerate(rows):
-            # Textspalten
-            for c in range(self.COL_REOPEN):
-                val = row[c]
-                text = "" if val is None else str(val)
-                display = (text[:200] + "…") if (c == self.COL_NOTES and len(text) > 200) else text
+            internal_id = int(row[0]) if row and row[0] is not None else 0
 
-                item = QTableWidgetItem(display)
-                item.setToolTip(text)
-                if c == self.COL_ID:
+            for c in range(self.COL_REOPEN):
+                val = row[c] if c < len(row) else None
+                full_text = "" if val is None else str(val)
+
+                if c == self.COL_TAGE:
+                    # 🔧 WICHTIG: DisplayRole als INT setzen → numerische Sortierung
+                    days = self._days_between(str(row[self.COL_ABGABE] or ""), str(row[self.COL_ZURUECK] or ""))
+                    item = QTableWidgetItem()
+                    if days is None:
+                        item.setData(Qt.ItemDataRole.DisplayRole, -1)  # sentinel, bleibt numerisch
+                        item.setToolTip("Kein gültiger Zeitraum (Abgabe oder Zurück fehlt)")
+                    else:
+                        item.setData(Qt.ItemDataRole.DisplayRole, int(days))
+                        item.setToolTip(f"Insgesamt {int(days)} Tag(e) in Reparatur")
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    try:
-                        item.setData(Qt.ItemDataRole.UserRole, int(text or "0"))
-                    except ValueError:
-                        item.setData(Qt.ItemDataRole.UserRole, 0)
-                elif c in (self.COL_ABGABE, self.COL_ZURUECK):
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter)
-                    item.setData(Qt.ItemDataRole.UserRole, self._date_sort_key(text))
                 else:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+                    display = full_text
+                    if c == self.COL_NOTES and len(full_text) > 200:
+                        display = full_text[:200] + "…"
+                    item = QTableWidgetItem(display)
+                    item.setToolTip(full_text or "")
+                    if c in (self.COL_ABGABE, self.COL_ZURUECK):
+                        item.setData(Qt.ItemDataRole.UserRole, self._date_sort_key(full_text))
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    else:
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(r, c, item)
 
-            case_id = int(row[self.COL_ID])
-
-            # Wieder öffnen?
             chk = QCheckBox()
             chk.setText("")
             chk.setEnabled(not self.read_only)
-            chk.setProperty("case_id", case_id)
+            chk.setProperty("case_id", internal_id)
             chk.clicked.connect(self._on_reopen_clicked)
             self.table.setCellWidget(r, self.COL_REOPEN, self._centered_widget(chk))
 
-            # Löschen (nur Admin)
             if self.is_admin:
                 btn = QPushButton()
                 btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
                 btn.setToolTip("Eintrag löschen")
-                btn.clicked.connect(lambda _=False, cid=case_id: self._on_delete(cid))
+                btn.clicked.connect(lambda _=False, cid=internal_id: self._on_delete(cid))
                 self.table.setCellWidget(r, self.COL_DELETE, self._centered_widget(btn))
 
         self.table.resizeColumnsToContents()
-        self.table.setSortingEnabled(True)
+        self.table.setColumnWidth(self.COL_TAGE, max(self.table.columnWidth(self.COL_TAGE), 165))
+        self.table.setColumnWidth(self.COL_ABGABE, max(self.table.columnWidth(self.COL_ABGABE), 130))
+        self.table.setColumnWidth(self.COL_ZURUECK, max(self.table.columnWidth(self.COL_ZURUECK), 130))
 
+        self.table.setSortingEnabled(True)
         if self._first_refresh:
-            self.table.sortItems(self.COL_ZURUECK, Qt.SortOrder.DescendingOrder)
+            self.table.sortItems(self.COL_TAGE, Qt.SortOrder.DescendingOrder)
             self._first_refresh = False
         else:
             self.table.sortItems(sort_section, sort_order)
 
-    # ---------- Reopen ----------
+    def _export_done_cases(self):
+        path, _ = QFileDialog.getSaveFileName(self, "CSV exportieren (erledigt)", "erledigt.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            where_sql, params = self._scope_filter_sql()
+            cur = self.conn.cursor()
+            rows = cur.execute(
+                f"""
+                SELECT id, clinic, device_name, wave_number, submitter, service_provider,
+                       reason, date_submitted, date_returned
+                FROM cases
+                {where_sql}
+                ORDER BY id DESC
+                """,
+                params,
+            ).fetchall()
+
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f, delimiter=";")
+                w.writerow([
+                    "ID", "Klinik", "Gerät", "Wave- / Seriennummer",
+                    "Abgeber", "Techniker", "Grund", "Abgabe", "Zurück"
+                ])
+                w.writerows(rows)
+
+            QMessageBox.information(self, "Export", "Die erledigten Reparaturen wurden erfolgreich exportiert.")
+        except Exception as e:
+            QMessageBox.warning(self, "Export nicht möglich", f"Die CSV-Datei konnte nicht erstellt werden.\n\nDetails:\n{e}")
+
     def _on_reopen_clicked(self, checked: bool):
         if not checked:
             return
@@ -203,7 +263,7 @@ class DoneTab(QWidget):
             sender.setEnabled(True)
             QMessageBox.information(
                 self, "Offline gespeichert",
-                "Die DB war nicht erreichbar.\nDie Änderung wird beim nächsten Start synchronisiert."
+                "Die Datenbank war nicht erreichbar. Die Änderung wird beim nächsten Start synchronisiert."
             )
 
         try:
@@ -231,13 +291,12 @@ class DoneTab(QWidget):
             })
             QTimer.singleShot(0, offline_reset)
 
-    # ---------- Delete ----------
     def _on_delete(self, case_id: int):
         if not self.is_admin:
             return
         ok = QMessageBox.question(
             self, "Löschen bestätigen",
-            f"Fall {case_id} wirklich löschen?\nDies kann nicht rückgängig gemacht werden."
+            f"Fall {case_id} wirklich löschen? Dieser Schritt kann nicht rückgängig gemacht werden."
         )
         if ok != QMessageBox.StandardButton.Yes:
             return
@@ -254,18 +313,8 @@ class DoneTab(QWidget):
             QMessageBox.warning(
                 self,
                 "Löschen nicht möglich",
-                "Löschung nicht möglich, weil die Datenbank gesperrt ist.\n"
-                "Bitte später erneut versuchen."
+                "Löschen ist derzeit nicht möglich, weil die Datenbank gesperrt ist. Bitte später erneut versuchen."
             )
-
-    # ---------- Helpers ----------
-    def _ensure_case_columns(self, names: list[str]) -> None:
-        cur = self.conn.cursor()
-        cur.execute("PRAGMA table_info(cases);")
-        existing = {row[1] for row in cur.fetchall()}
-        for n in names:
-            if n not in existing:
-                self.conn.execute(f"ALTER TABLE cases ADD COLUMN {n} TEXT")
 
     def _after_reopen_success(self, case_id: int, device_label: str):
         self.case_reopened.emit(case_id)
@@ -280,6 +329,16 @@ class DoneTab(QWidget):
             return (dt - datetime(1970, 1, 1)).days
         except Exception:
             return -10**9
+
+    def _days_between(self, start: Optional[str], end: Optional[str]) -> Optional[int]:
+        if not start or not end:
+            return None
+        try:
+            d1 = datetime.fromisoformat(start.strip())
+            d2 = datetime.fromisoformat(end.strip())
+            return max(0, (d2 - d1).days)
+        except Exception:
+            return None
 
     def _device_label(self, case_id: int) -> str:
         try:
@@ -296,3 +355,11 @@ class DoneTab(QWidget):
         name = (name or "").strip()
         wave = (wave or "").strip()
         return f"{name} ({wave})" if wave else (name or f"ID {case_id}")
+
+    def _ensure_case_columns(self, names: list[str]) -> None:
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(cases);")
+        existing = {row[1] for row in cur.fetchall()}
+        for n in names:
+            if n not in existing:
+                self.conn.execute(f"ALTER TABLE cases ADD COLUMN {n} TEXT")

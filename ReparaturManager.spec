@@ -1,26 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
 from PyInstaller.utils.hooks import collect_all
 
-pyqt6_datas, pyqt6_bins, pyqt6_hidden = collect_all("PyQt6")
-bcrypt_datas, bcrypt_bins, bcrypt_hidden = collect_all("bcrypt")
-# Optional, falls nötig:
-# cffi_datas, cffi_bins, cffi_hidden = collect_all("cffi")
+datas = []
+binaries = []
+hiddenimports = ['bcrypt']
+tmp_ret = collect_all('PyQt6')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
-block_cipher = None
 
 a = Analysis(
-    ['app/main.py'],
-    pathex=[os.path.abspath('.')],
-    binaries=pyqt6_bins + bcrypt_bins,  # + cffi_bins
-    datas=pyqt6_datas + bcrypt_datas + [  # + cffi_datas
-        # ('resources/buffer_queue.json', 'resources'),
-        # ('icons/app.ico', 'icons'),
-    ],
-    hiddenimports=pyqt6_hidden + bcrypt_hidden + [
-        'bcrypt',
-        # *cffi_hidden  # falls oben aktiviert
-    ],
+    ['app\\main.py'],
+    pathex=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -28,8 +21,7 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
-
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
@@ -37,24 +29,23 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='ReparaturManager',
-    icon='icons/app.ico',
-    debug=False,
+    debug=True,
     bootloader_ignore_signals=False,
     strip=False,
-
-    # ↓↓↓ hier anpassen ↓↓↓
-    upx=False,                 # UPX ausschalten
-    upx_exclude=[],
-    console=False,              # Für Debug-Ausgabe aktivieren
-    # ↑↑↑ nachher wieder False setzen, wenn alles läuft ↑↑↑
-
-    runtime_tmpdir=None,
+    upx=True,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
 )
-
 coll = COLLECT(
     exe,
     a.binaries,
-    a.zipfiles,
     a.datas,
-    name='ReparaturManager'
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='ReparaturManager',
 )
