@@ -45,12 +45,14 @@ class OpenTab(QWidget):
         clinics_csv: str,
         read_only: bool,
         current_username: Optional[str] = None,
+        current_user_id: Optional[int] = None,   # falls du user_id im Audit mitschreiben willst
     ):
         super().__init__()
         self.conn = conn
         self.read_only = read_only
         self.allowed = clinics_of_user(role, clinics_csv)
         self.current_username = current_username or ""
+        self.current_user_id = current_user_id
         self._created_by_expr, self._notes_expr = self._detect_column_exprs()
 
         # Suche
@@ -209,7 +211,7 @@ class OpenTab(QWidget):
             # Farbe für „Tage offen“
             self._apply_age_color_to_row(r)
 
-        # Auto nach Inhalt berechnen
+        # Spaltenbreiten nach Inhalt
         self.table.resizeColumnsToContents()
         # Danach erste Spalte robust machen: korrekte Mindestbreite berechnen und fixieren
         self._lock_first_header_width()
@@ -230,7 +232,7 @@ class OpenTab(QWidget):
         self.table.resizeColumnToContents(self.COL_TAGE)
 
         need = self._needed_header_width(self.COL_TAGE)
-        # harte Untergrenze (passt zu Standard-Themes; gern auf 190 oder 200 erhöhen, wenn nötig)
+        # harte Untergrenze (bei Bedarf auf 190–200 erhöhen)
         MIN_HEADER0 = 180
         width = max(self.table.columnWidth(self.COL_TAGE), need, MIN_HEADER0)
 
@@ -252,19 +254,15 @@ class OpenTab(QWidget):
         if not item:
             return self.table.columnWidth(col)
 
-        # Textbreite mit dem aktuellen Header-Font
         fm: QFontMetrics = hdr.fontMetrics()
         text_w = fm.horizontalAdvance(item.text())
 
-        # Sortpfeil nur berücksichtigen, wenn diese Spalte die aktuelle Sortspalte ist
         sort_w = 0
         if hdr.sortIndicatorSection() == col:
             sort_w = self.style().pixelMetric(QStyle.PixelMetric.PM_HeaderMarkSize, None, hdr) or 0
 
-        # etwas Puffer für linkes/rechtes Padding und Reserve
-        padding_lr = 32
-        extra = 16
-
+        padding_lr = 32  # links + rechts
+        extra = 16       # Reserve
         return text_w + sort_w + padding_lr + extra
 
     # ---------------- Export ----------------
@@ -318,13 +316,35 @@ class OpenTab(QWidget):
                     "UPDATE cases SET status='Abgeschlossen', date_returned=?, closed_by=? WHERE id=?",
                     (today, self.current_username, case_id)
                 )
-                self.conn.execute(
-                    "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
-                    ("case_update", "case", case_id, json.dumps(
-                        {"status": "Abgeschlossen", "date_returned": today, "closed_by": self.current_username},
-                        ensure_ascii=False
-                    ))
-                )
+                # Optional: user_id mitschreiben (falls übergeben)
+                if self.current_user_id is not None:
+                    self.conn.execute(
+                        "INSERT INTO audit_log(user_id, action, entity, entity_id, details) VALUES(?,?,?,?,?)",
+                        (
+                            self.current_user_id,
+                            "case_update",
+                            "case",
+                            case_id,
+                            json.dumps(
+                                {"status": "Abgeschlossen", "date_returned": today, "closed_by": self.current_username},
+                                ensure_ascii=False
+                            )
+                        )
+                    )
+                else:
+                    self.conn.execute(
+                        "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
+                        (
+                            "case_update",
+                            "case",
+                            case_id,
+                            json.dumps(
+                                {"status": "Abgeschlossen", "date_returned": today, "closed_by": self.current_username},
+                                ensure_ascii=False
+                            )
+                        )
+                    )
+
             QTimer.singleShot(0, lambda: self._after_done_success(case_id, device_label))
         except Exception:
             enqueue_write({

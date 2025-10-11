@@ -1,6 +1,4 @@
 # app/tabs/create_tab.py
-from __future__ import annotations
-
 import json
 import sqlite3
 from typing import Optional
@@ -12,22 +10,12 @@ from PyQt6.QtWidgets import (
 )
 
 from app.backend.helpers.helpers import clinic_choices_for
-    # Ermittelt die erlaubten Kliniken für die aktuelle Rolle
 from app.backend.helpers.buffer import enqueue_write
-    # Fällt offline auf einen lokalen Puffer zurück, der später synchronisiert wird
 
-
-MAX_INPUT_CHARS = 30  # harte Obergrenze für alle Eingabefelder
+MAX_INPUT_CHARS = 30  # harte Obergrenze für alle Einzelfelder; Notizen separat begrenzt
 
 
 class CreateTab(QWidget):
-    """
-    Neuer Fall erfassen:
-    - Pflichtfelder mit Live-Limits
-    - Klinikauswahl anhand Rolle/Rechte
-    - Audit-Eintrag bei Erfolg
-    - Offline-Puffer, falls die Datenbank gerade nicht erreichbar ist
-    """
     case_created = pyqtSignal()
 
     def __init__(
@@ -36,15 +24,17 @@ class CreateTab(QWidget):
         role: str,
         clinics_csv: str,
         submitter_default: Optional[str] = None,
-        current_username: Optional[str] = None,  # landet als created_by in der DB
+        current_username: Optional[str] = None,   # wird in created_by abgelegt (DB: TEXT)
+        current_user_id: Optional[int] = None,    # wird für audit_log.user_id verwendet
     ):
         super().__init__()
         self.conn = conn
         self.role = role
         self.clinics_csv = clinics_csv
-        self.current_username = current_username or ""
+        self.current_username = (current_username or "").strip()
+        self.current_user_id = current_user_id
 
-        # --- Felder ---
+        # --- Eingabefelder ---
         self.device = QLineEdit()
         self.device.setPlaceholderText("z. B. Endoskop")
         self.device.setMaxLength(MAX_INPUT_CHARS)
@@ -54,7 +44,7 @@ class CreateTab(QWidget):
         self.wave.setMaxLength(MAX_INPUT_CHARS)
 
         self.submitter = QLineEdit()
-        self.submitter.setPlaceholderText("z. B. Max Muster (änderbar)")
+        self.submitter.setPlaceholderText("z. B. Max Muster")
         self.submitter.setMaxLength(MAX_INPUT_CHARS)
         if submitter_default:
             self.submitter.setText(submitter_default[:MAX_INPUT_CHARS])
@@ -75,14 +65,14 @@ class CreateTab(QWidget):
         self.date_sub.setDate(QDate.currentDate())
 
         self.notes = QTextEdit()
-        self.notes.setPlaceholderText(f"Notizen (max. {MAX_INPUT_CHARS} Zeichen)")
-        self.notes.textChanged.connect(self._enforce_notes_limit)  # begrenzt auch Einfügen
+        self.notes.setPlaceholderText("Notizen (maximal 30 Zeichen)")
+        self.notes.textChanged.connect(self._enforce_notes_limit)
 
         # --- Layout ---
         form = QFormLayout()
         form.addRow("Klinik*", self.clinic)
         form.addRow("Gerät*", self.device)
-        form.addRow("Wave- / Serienummer*", self.wave)
+        form.addRow("Wave- / Seriennummer*", self.wave)
         form.addRow("Abgeber*", self.submitter)
         form.addRow("Techniker*", self.provider)
         form.addRow("Grund*", self.reason)
@@ -96,31 +86,27 @@ class CreateTab(QWidget):
         lay.addLayout(form)
         lay.addWidget(self.btn_save, alignment=Qt.AlignmentFlag.AlignRight)
 
-    # ================= UI-Helfer =================
-    def _reload_clinics(self) -> None:
-        """Befüllt die Klinikauswahl anhand der Rolle/Rechte."""
+    # ----------------- UI-Helpers -----------------
+    def _reload_clinics(self):
         self.clinic.clear()
         for name in clinic_choices_for(self.role, self.clinics_csv):
             self.clinic.addItem(name)
 
-    def _clear_form(self) -> None:
-        """Setzt alle Eingaben zurück."""
+    def _clear_form(self):
         for w in (self.device, self.wave, self.provider, self.reason, self.submitter):
             w.clear()
             w.setStyleSheet("")
         self.notes.clear()
         self.date_sub.setDate(QDate.currentDate())
 
-    def _mark_invalid(self, widget) -> None:
-        """Hebt ein ungültiges Feld sichtbar hervor."""
+    def _mark_invalid(self, widget):
         widget.setStyleSheet(
             "border: 1px solid #d9534f; "
             "box-shadow: 0 0 0 3px rgba(217,83,79,.15);"
         )
         widget.setFocus()
 
-    def _enforce_notes_limit(self) -> None:
-        """Schneidet Notizen auf die Höchstlänge, Cursorposition bleibt möglichst stabil."""
+    def _enforce_notes_limit(self):
         txt = self.notes.toPlainText()
         if len(txt) <= MAX_INPUT_CHARS:
             return
@@ -134,12 +120,9 @@ class CreateTab(QWidget):
         self.notes.setTextCursor(cur)
         self.notes.blockSignals(False)
 
-    # ================ Persistenz ================
-    def _ensure_columns(self) -> None:
-        """
-        Stellt sicher, dass optionale Spalten vorhanden sind.
-        Erweitert ältere Datenbanken bei Bedarf.
-        """
+    # ----------------- Persistenz -----------------
+    def _ensure_columns(self):
+        """Rüstet optionale Spalten nach, falls älteres Schema."""
         cur = self.conn.cursor()
         cur.execute("PRAGMA table_info(cases);")
         existing = {row[1] for row in cur.fetchall()}
@@ -149,13 +132,9 @@ class CreateTab(QWidget):
             if "closed_by" not in existing:
                 self.conn.execute("ALTER TABLE cases ADD COLUMN closed_by TEXT")
 
-    # ================= Aktionen =================
-    def on_save(self) -> None:
-        """
-        Validiert Eingaben, speichert den Fall und schreibt einen Audit-Eintrag.
-        Bei vorübergehend fehlender Verbindung landet der Datensatz im Offline-Puffer.
-        """
-        # Pflichtfelder (defensiv erneut gekürzt)
+    # ----------------- Aktionen -----------------
+    def on_save(self):
+        # Pflichtfelder (defensiv erneut kappen)
         clinic = self.clinic.currentText().strip()
         device = self.device.text().strip()[:MAX_INPUT_CHARS]
         wave = self.wave.text().strip()[:MAX_INPUT_CHARS]
@@ -164,6 +143,7 @@ class CreateTab(QWidget):
         reason = self.reason.text().strip()[:MAX_INPUT_CHARS]
         date_submitted_str = self.date_sub.date().toString("yyyy-MM-dd")
 
+        # Validierung
         if not clinic:
             QMessageBox.warning(self, "Validierung", "Bitte eine Klinik wählen.")
             return
@@ -212,37 +192,41 @@ class CreateTab(QWidget):
                     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        payload["clinic"],
-                        payload["device_name"],
-                        payload["wave_number"],
-                        payload["submitter"],
-                        payload["service_provider"],
-                        payload["status"],
-                        payload["reason"],
-                        payload["date_submitted"],
-                        payload["date_returned"],
-                        payload["notes"],
-                        payload["created_by"],
-                        None,
-                    ),
+                        payload["clinic"], payload["device_name"], payload["wave_number"], payload["submitter"],
+                        payload["service_provider"], payload["status"], payload["reason"],
+                        payload["date_submitted"], payload["date_returned"], payload["notes"],
+                        payload["created_by"], None,
+                    )
                 )
                 case_id = cur.lastrowid
+
+                # Audit mit user_id
                 self.conn.execute(
-                    "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
-                    ("case_create", "case", case_id, json.dumps(payload, ensure_ascii=False)),
+                    "INSERT INTO audit_log(user_id, action, entity, entity_id, details) VALUES(?,?,?,?,?)",
+                    (
+                        self.current_user_id,
+                        "case_create",
+                        "case",
+                        case_id,
+                        json.dumps(payload, ensure_ascii=False),
+                    )
                 )
 
             self._clear_form()
-            QMessageBox.information(self, "Erfasst", "Fall wurde erfasst. Status: In Reparatur.")
+            QMessageBox.information(
+                self,
+                "Erfasst",
+                "Der Fall wurde erfasst. Status: In Reparatur."
+            )
             self.case_created.emit()
 
         except Exception:
-            # Offline-Fallback: später synchronisieren
+            # Offline-Fallback: in Puffer schreiben (wird beim Start synchronisiert)
             enqueue_write(dict(payload, type="insert_case"))
             self._clear_form()
             QMessageBox.information(
                 self,
                 "Offline gespeichert",
                 "Die Datenbank war nicht erreichbar oder gesperrt.\n"
-                "Die Änderung wurde lokal gespeichert und beim nächsten Start synchronisiert.",
+                "Die Änderung wurde lokal gespeichert und beim nächsten Start synchronisiert."
             )

@@ -67,6 +67,7 @@ class Main(QMainWindow):
                 clinics_csv=self.clinics_csv,
                 submitter_default=self.username,
                 current_username=self.username,
+                current_user_id=self.user_id,
             )
             self.tab_create.case_created.connect(self._on_case_created)
             self.tabs.addTab(self.tab_create, "Erfassen")
@@ -78,8 +79,14 @@ class Main(QMainWindow):
             clinics_csv=self.clinics_csv,
             read_only=(self.role == "Viewer"),
             current_username=self.username,
+            current_user_id=self.user_id,
         )
-        self.tab_done = DoneTab(self.conn, role=self.role, clinics_csv=self.clinics_csv)
+        self.tab_done = DoneTab(
+            self.conn,
+            role=self.role,
+            clinics_csv=self.clinics_csv,
+            current_user_id=self.user_id,t
+        )
 
         self.tab_open.case_completed.connect(self._on_case_completed)
         self.tab_done.case_reopened.connect(self._on_case_reopened)

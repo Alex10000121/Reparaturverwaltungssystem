@@ -38,12 +38,13 @@ class DoneTab(QWidget):
     COL_REOPEN = 12
     COL_DELETE = 13
 
-    def __init__(self, conn: sqlite3.Connection, role: str, clinics_csv: str):
+    def __init__(self, conn: sqlite3.Connection, role: str, clinics_csv: str, current_user_id: Optional[int] = None):
         super().__init__()
         self.conn = conn
         self.allowed = clinics_of_user(role, clinics_csv)
         self.read_only = (role == "Viewer")
         self.is_admin = (role == "Admin")
+        self.current_user_id = current_user_id
 
         # Optionale Spalten ermitteln
         self._created_by_expr, self._closed_by_expr, self._notes_expr = self._detect_column_exprs()
@@ -169,7 +170,7 @@ class DoneTab(QWidget):
         self.table.setRowCount(len(rows))
 
         for r, row in enumerate(rows):
-            # Textspalten
+            # Textspalten bis vor die Aktionsspalten
             for c in range(self.COL_REOPEN):
                 val = row[c]
                 full_text = "" if val is None else str(val)
@@ -179,7 +180,7 @@ class DoneTab(QWidget):
                     d1 = self._parse_iso(row[self.COL_ABGABE])
                     d2 = self._parse_iso(row[self.COL_ZURUECK])
                     days = -1
-                    tip = "Kein gueltiges Datum"
+                    tip = "Kein gültiges Datum"
                     if d1 and d2 and d2 >= d1:
                         days = (d2 - d1).days
                         tip = f"{days} Tag(e) zwischen Abgabe und Zurück"
@@ -226,7 +227,7 @@ class DoneTab(QWidget):
 
         self.table.setSortingEnabled(True)
         if self._first_refresh:
-            # Neueste Rückgabe zuerst; alternativ auf Tage sortieren:
+            # Neueste Rückgabe zuerst; alternative: nach Tagen sortieren
             # self.table.sortItems(self.COL_TAGE, Qt.SortOrder.DescendingOrder)
             self.table.sortItems(self.COL_ZURUECK, Qt.SortOrder.DescendingOrder)
             self._first_refresh = False
@@ -264,12 +265,19 @@ class DoneTab(QWidget):
                     "UPDATE cases SET status='In Reparatur', date_returned=NULL, closed_by=NULL WHERE id=?",
                     (case_id,)
                 )
+                # Audit mit user_id
                 self.conn.execute(
-                    "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
-                    ("case_update", "case", case_id, json.dumps(
-                        {"status": "In Reparatur", "date_returned": None, "closed_by": None},
-                        ensure_ascii=False
-                    ))
+                    "INSERT INTO audit_log(user_id, action, entity, entity_id, details) VALUES(?,?,?,?,?)",
+                    (
+                        self.current_user_id,
+                        "case_update",
+                        "case",
+                        case_id,
+                        json.dumps(
+                            {"status": "In Reparatur", "date_returned": None, "closed_by": None},
+                            ensure_ascii=False
+                        )
+                    )
                 )
             QTimer.singleShot(0, lambda: self._after_reopen_success(case_id, device_label))
         except Exception:
@@ -295,9 +303,16 @@ class DoneTab(QWidget):
         try:
             with self.conn:
                 self.conn.execute("DELETE FROM cases WHERE id=?", (case_id,))
+                # Audit mit user_id
                 self.conn.execute(
-                    "INSERT INTO audit_log(action, entity, entity_id, details) VALUES(?,?,?,?)",
-                    ("case_delete", "case", case_id, json.dumps({"id": case_id}, ensure_ascii=False))
+                    "INSERT INTO audit_log(user_id, action, entity, entity_id, details) VALUES(?,?,?,?,?)",
+                    (
+                        self.current_user_id,
+                        "case_delete",
+                        "case",
+                        case_id,
+                        json.dumps({"id": case_id}, ensure_ascii=False)
+                    )
                 )
             self.case_deleted.emit(case_id)
             self.refresh()
