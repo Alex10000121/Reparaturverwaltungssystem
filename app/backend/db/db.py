@@ -358,7 +358,7 @@ def prune_completed_cases(conn: sqlite3.Connection, keep: int = 1000) -> int:
         conn.execute(f"DELETE FROM cases WHERE id IN ({q})", ids)
     return len(ids)
 
-def prune_audit_log(conn: sqlite3.Connection, keep: int = 50000) -> int:
+def prune_audit_log(conn: sqlite3.Connection, keep: int = 5000) -> int:
     cur = conn.cursor()
     total = cur.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
     over = max(0, total - keep)

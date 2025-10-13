@@ -59,7 +59,7 @@ class Main(QMainWindow):
 
             # alte Eintraege begrenzen
             removed_cases = prune_completed_cases(self.conn, keep=1000)
-            removed_audit = prune_audit_log(self.conn, keep=50000)
+            removed_audit = prune_audit_log(self.conn, keep=5000)
 
             # Speicher wirklich ans Dateisystem zurÜckgeben
             try:
@@ -70,7 +70,7 @@ class Main(QMainWindow):
             try:
                 self.conn.execute("VACUUM")
             except Exception:
-                # falls VACUUM einmal fehlschägt, App trotzdem weiter starten
+                # falls VACUUM einmal fehlschlägt, App trotzdem weiter starten
                 pass
 
         except Exception as e:
