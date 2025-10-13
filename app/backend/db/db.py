@@ -335,3 +335,42 @@ def set_user_password(user_id: int, new_plain: str) -> None:
                 json.dumps({"user_id": user_id}, ensure_ascii=False),
             ),
         )
+# Pruning: Alte Einträge löschen, um DB klein zu halten
+
+def prune_completed_cases(conn: sqlite3.Connection, keep: int = 1000) -> int:
+    cur = conn.cursor()
+    over = cur.execute(
+        "SELECT MAX(COUNT(*), 0) FROM (SELECT 1 FROM cases WHERE status='Abgeschlossen')"
+    ).fetchone()[0] - keep
+    over = max(0, over or 0)
+    if over <= 0:
+        return 0
+    ids = [r[0] for r in cur.execute("""
+        SELECT id FROM cases
+        WHERE status='Abgeschlossen'
+        ORDER BY (date_returned IS NULL) ASC, date_returned ASC, id ASC
+        LIMIT ?
+    """, (over,)).fetchall()]
+    if not ids:
+        return 0
+    q = ",".join("?" * len(ids))
+    with conn:
+        conn.execute(f"DELETE FROM cases WHERE id IN ({q})", ids)
+    return len(ids)
+
+def prune_audit_log(conn: sqlite3.Connection, keep: int = 50000) -> int:
+    cur = conn.cursor()
+    total = cur.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    over = max(0, total - keep)
+    if over <= 0:
+        return 0
+    with conn:
+        conn.execute("""
+            DELETE FROM audit_log
+            WHERE id IN (
+                SELECT id FROM audit_log
+                ORDER BY id ASC
+                LIMIT ?
+            )
+        """, (over,))
+    return over

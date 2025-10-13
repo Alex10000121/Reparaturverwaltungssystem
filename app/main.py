@@ -15,6 +15,7 @@ from app.frontend.tabs.create_tab import CreateTab
 from app.frontend.tabs.open_tab import OpenTab
 from app.frontend.tabs.done_tab import DoneTab
 from app.frontend.tabs.admin_tab import AdminTab
+from app.backend.db.db import prune_completed_cases, prune_audit_log
 
 
 def _base_dir() -> str:
@@ -26,7 +27,7 @@ def _base_dir() -> str:
 
 
 def resource_path(relative: str) -> str:
-    """Ressourcenpfad auflösen, egal ob Entwicklung oder Bundle."""
+    """Ressourcenpfad aufloesen, egal ob Entwicklung oder Bundle."""
     return os.path.join(_base_dir(), relative)
 
 
@@ -38,7 +39,7 @@ class Main(QMainWindow):
         self.resize(1280, 860)
         self.setWindowState(Qt.WindowState.WindowMaximized)
 
-        # zentrales DB Handle
+        # zentrale DB Verbindung
         self.conn: sqlite3.Connection = get_conn()
 
         self.user_id = user_id
@@ -46,15 +47,32 @@ class Main(QMainWindow):
         self.clinics_csv = clinics_csv
         self.username = username
 
-        # App Icon auch am Hauptfenster setzen (Taskleiste, Alt-Tab)
+        # App Icon am Fenster setzen
         icon_file = resource_path(os.path.join("app", "frontend", "assets", "app.ico"))
         if os.path.exists(icon_file):
             self.setWindowIcon(QIcon(icon_file))
 
-        # Start Sync des Offline Puffers
+        # Offline Puffer synchronisieren, dann Pruning und VACUUM
         ok = fail = 0
         try:
             ok, fail = sync_buffer_once(self.conn)
+
+            # alte Eintraege begrenzen
+            removed_cases = prune_completed_cases(self.conn, keep=1000)
+            removed_audit = prune_audit_log(self.conn, keep=50000)
+
+            # Speicher wirklich ans Dateisystem zurÜckgeben
+            try:
+                # VACUUM darf nicht in einer offenen Transaktion laufen
+                self.conn.commit()
+            except Exception:
+                pass
+            try:
+                self.conn.execute("VACUUM")
+            except Exception:
+                # falls VACUUM einmal fehlschägt, App trotzdem weiter starten
+                pass
+
         except Exception as e:
             QMessageBox.information(self, "Start Sync", f"Start Sync nicht abgeschlossen:\n{e}")
 
@@ -84,7 +102,7 @@ class Main(QMainWindow):
                 clinics_csv=self.clinics_csv,
                 submitter_default=self.username,
                 current_username=self.username,
-                current_user_id=self.user_id,  # für Audit user_id
+                current_user_id=self.user_id,  # fuer Audit user_id
             )
             self.tab_create.case_created.connect(self._on_case_created)
             self.tabs.addTab(self.tab_create, "Erfassen")
@@ -149,7 +167,7 @@ class Main(QMainWindow):
         super().closeEvent(event)
 
     def _shutdown(self):
-        """Schreibt anstehende Änderungen, versucht den Offline Puffer zu synchronisieren und schließt die DB."""
+        """Schreibt anstehende Aenderungen, versucht den Offline Puffer zu synchronisieren und schliesst die DB."""
         if not hasattr(self, "conn") or self.conn is None:
             return
         try:
@@ -163,7 +181,7 @@ class Main(QMainWindow):
             except Exception:
                 pass
 
-            # Bei WAL Betrieb sauber checkpointen
+            # bei WAL Betrieb sauber checkpointen
             try:
                 self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
             except Exception:
@@ -191,7 +209,7 @@ def run():
         pass
 
     login = Login()
-    # auch beim Login das Icon sicherstellen
+    # Icon auch fuer den Login Dialog setzen
     if os.path.exists(icon_file):
         login.setWindowIcon(QIcon(icon_file))
     login.show()
@@ -201,7 +219,7 @@ def run():
         uid, role, clinics_csv = login.authed
         uname = login.user.text().strip()
         win = Main(uid, role, clinics_csv, uname)
-        # Icon auch im Hauptfenster setzen, falls Theme oder Desktopumgebung dies erwartet
+        # Icon auch im Hauptfenster setzen, falls die Umgebung dies erwartet
         if os.path.exists(icon_file):
             win.setWindowIcon(QIcon(icon_file))
         win.show()
