@@ -36,9 +36,6 @@ Diese Applikation dient zur Verwaltung von Reparaturen medizinischer Geräte.
 ## Build als EXE
 
 Beispiel mit PyInstaller:
-```bash
- pip install pyinstaller
-```
 
 ```bash
  python -m PyInstaller --clean --noconfirm ReparaturManager.spec
